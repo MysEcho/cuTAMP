@@ -72,7 +72,7 @@ class RerunRobot:
         self.urdf.update_cfg(joint_positions)
         log_scene(scene=self.urdf.scene, node=self.urdf.base_link, path=self.name, static=False, add_mesh=False)
 
-    def get_rr_columns(self, joint_positions: Float[torch.Tensor, "n d"]) -> Dict[str, rr.Transform3D.columns]:
+    def get_rr_columns(self, joint_positions):
         """
         Gets the Rerun columns for a batch of joint positions for use in columnar logging. This is especially helpful
         for logging joint trajectories, as it's much faster than individual row-oriented logging.

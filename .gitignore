@@ -1,0 +1,7 @@
+cutamp/__pycache__/
+cutamp/envs/__pycache__/
+cutamp/robots/__pycache__/
+cutamp/scripts/__pycache__/
+cutamp/task_planning/__pycache__/
+cutamp/utils/__pycache__/
+cuTAMP.egg-info/

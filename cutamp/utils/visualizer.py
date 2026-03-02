@@ -183,7 +183,8 @@ class RerunVisualizer(Visualizer):
     def log_mat4x4(self, name: str, mat4x4: Float[Union[torch.Tensor, np.ndarray], "4 4"]):
         if isinstance(mat4x4, torch.Tensor):
             mat4x4 = mat4x4.detach().cpu()
-        rr.log(name, rr.Transform3D(translation=mat4x4[:3, 3], mat3x3=mat4x4[:3, :3], axis_length=AXIS_LENGTH))
+        rr.log(name, rr.Transform3D(translation=mat4x4[:3, 3], mat3x3=mat4x4[:3, :3]))
+                                    # , axis_length=AXIS_LENGTH)
 
     def log_spheres(self, name: str, spheres: Float[torch.Tensor, "n 4"]):
         if isinstance(spheres, torch.Tensor):
@@ -191,7 +192,7 @@ class RerunVisualizer(Visualizer):
         rr.log(name, rr.Points3D(positions=spheres[:, :3], radii=spheres[:, 3]))
 
     def log_scalar(self, name: str, value: float):
-        rr.log(name, rr.Scalars(value))
+        rr.log(name, rr.TimeSeriesScalar(value))
 
 
 def rr_log_tamp_world(world: TAMPWorld, log_spheres: bool = True, log_arrows: bool = True):

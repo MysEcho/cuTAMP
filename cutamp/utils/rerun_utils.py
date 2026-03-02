@@ -61,8 +61,8 @@ def trimesh_to_rerun(
             vertex_positions=mesh.vertices,
             vertex_colors=vertex_colors,
             vertex_normals=mesh.vertex_normals,
-            triangle_indices=mesh.faces,
-            albedo_factor=albedo_factor,
+            indices=mesh.faces,
+            # albedo_factor=albedo_factor,
         )
     else:
         raise NotImplementedError(f"Unsupported trimesh geometry: {type(geometry)}")
@@ -94,9 +94,9 @@ def log_scene(
                 rr.Transform3D(
                     translation=world_from_mesh[:3, 3],
                     mat3x3=world_from_mesh[:3, :3],
-                    axis_length=0.0,
+                    # axis_length=0.0,
                 ),
-                static=static,
+                # static=static,
             )
 
         # Log this node's mesh, if it has one.
@@ -104,7 +104,9 @@ def log_scene(
             mesh = cast(trimesh.Trimesh, scene.geometry.get(node_data[1]))
             # Log mesh as static so we can reuse it. Re-logging it has high costs
             if mesh:
-                rr.log(path, trimesh_to_rerun(mesh), static=True)
+                rr.log(path, trimesh_to_rerun(mesh), 
+                    #    static=True
+                       )
 
     if children:
         for child in children:
@@ -141,7 +143,7 @@ def curobo_to_rerun(entity: CuroboMesh, compute_vertex_normals: bool = True) -> 
 
         rr_mesh = rr.Mesh3D(
             vertex_positions=mesh.vertices,
-            triangle_indices=mesh.faces,
+            indices=mesh.faces,
             vertex_normals=vertex_normals,
             vertex_colors=mesh.vertex_colors,
         )
@@ -155,14 +157,27 @@ def pose_list_to_transform3d(pose: Union[list[float], None], axis_length: Union[
     # Curobo stores poses as [x y z qw qx qy qz]
     quat_wxyz = pose[3:]
     quat_xyzw = [quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]]
-    return rr.Transform3D(translation=pose[:3], quaternion=quat_xyzw, axis_length=axis_length)
+    import numpy as np
+
+    # Convert quaternion (xyzw) to rotation matrix
+    x, y, z, w = quat_xyzw
+    R = np.array([
+        [1 - 2*y*y - 2*z*z,     2*x*y - 2*z*w,     2*x*z + 2*y*w],
+        [2*x*y + 2*z*w,         1 - 2*x*x - 2*z*z, 2*y*z - 2*x*w],
+        [2*x*z - 2*y*w,         2*y*z + 2*x*w,     1 - 2*x*x - 2*y*y],
+    ])
+
+    return rr.Transform3D(
+        translation=pose[:3],
+        mat3x3=R,
+    )
 
 
 def log_curobo_pose_to_rerun(key: str, obj: Obstacle, static_transform: bool, log_arrows: bool = False):
     rr.log(
         key,
         pose_list_to_transform3d(obj.pose, axis_length=AXIS_LENGTH if log_arrows else None),
-        static=static_transform,
+        # static=static_transform,
     )
 
 
@@ -170,4 +185,6 @@ def log_curobo_mesh_to_rerun(
     key: str, mesh: CuroboMesh, static_transform: bool, static_mesh: bool = True, log_arrows: bool = False
 ):
     log_curobo_pose_to_rerun(key, mesh, static_transform, log_arrows)
-    rr.log(key, curobo_to_rerun(mesh, compute_vertex_normals=True), static=static_mesh)
+    rr.log(key, curobo_to_rerun(mesh, compute_vertex_normals=True)
+        #    , static=static_mesh
+           )
