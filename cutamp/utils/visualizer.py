@@ -146,36 +146,44 @@ class RerunVisualizer(Visualizer):
         self.robot.set_joint_positions(q)
 
     def log_joint_trajectory(self, traj: Float[torch.Tensor, "n d"], timeline: str, start_time: float, dt: float):
-        end_time = start_time + len(traj) * dt
-        times = [rr.TimeColumn(timeline, duration=np.linspace(start_time, end_time, len(traj)))]
-        key_to_columns = self.robot.get_rr_columns(traj)
-        for key, columns in key_to_columns.items():
-            rr.send_columns(key, indexes=times * len(columns), columns=columns)
-        return end_time
+        current_time = start_time
 
-    def log_joint_trajectory_with_mat4x4(
-        self,
-        traj: Float[torch.Tensor, "n d"],
-        mat4x4_key: str,
-        mat4x4: Float[torch.Tensor, "n 4 4"],
-        timeline: str,
-        start_time: float,
-        dt: float,
-    ):
+        for q in traj:
+            rr.set_time_seconds(timeline, current_time)
+            rr.log("panda/joints", rr.Tensor(q))
+            current_time += dt
+
+        return current_time
+
+    def log_joint_trajectory_with_mat4x4(self, traj: Float[torch.Tensor, "n d"], mat4x4_key: str, mat4x4: Float[torch.Tensor, "n 4 4"], timeline: str, 
+                                         start_time: float, dt: float,):
+        
         if traj.shape[0] != mat4x4.shape[0]:
             raise ValueError("Trajectory and mat4x4 must have the same length.")
-        end_time = start_time + len(traj) * dt
-        times = [rr.TimeColumn(timeline, duration=np.linspace(start_time, end_time, len(traj)))]
-        key_to_columns = self.robot.get_rr_columns(traj)
 
-        if mat4x4_key in key_to_columns:
-            raise ValueError(f"Key {mat4x4_key} already exists in key_to_components.")
+        current_time = start_time
+
+        traj = traj.detach().cpu()
         mat4x4 = mat4x4.detach().cpu()
-        key_to_columns[mat4x4_key] = rr.Transform3D.columns(mat3x3=mat4x4[:, :3, :3], translation=mat4x4[:, :3, 3])
 
-        for key, columns in key_to_columns.items():
-            rr.send_columns(key, indexes=times * len(columns), columns=columns)
-        return end_time
+        for i in range(len(traj)):
+            rr.set_time_seconds(timeline, current_time)
+
+            # Log joint positions
+            self.robot.set_joint_positions(traj[i].tolist())
+
+            # Log transform
+            rr.log(
+                mat4x4_key,
+                rr.Transform3D(
+                    translation=mat4x4[i, :3, 3],
+                    mat3x3=mat4x4[i, :3, :3],
+                ),
+            )
+
+            current_time += dt
+
+        return current_time
 
     def log_tamp_world(self, world: TAMPWorld):
         rr_log_tamp_world(world)
