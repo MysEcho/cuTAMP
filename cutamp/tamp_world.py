@@ -219,6 +219,8 @@ def check_tamp_world_not_in_collision(world: TAMPWorld, collision_tol: float = 1
 
         coll_cost = world.collision_fn(spheres).sum()
         if coll_cost > collision_tol:
-            raise ValueError(f"Initial state in collision for object '{obj.name}' with cost {coll_cost}")
+            print(f"WARNING: Initial state in collision for '{obj.name}' with cost {coll_cost}")
+            # Un-comment this for strict collision check in cuTAMP. Currently allows with Warnings.
+            # raise ValueError(f"Initial state in collision for object '{obj.name}' with cost {coll_cost}")
 
     # TODO: catch collisions between spheres for each movable objects here

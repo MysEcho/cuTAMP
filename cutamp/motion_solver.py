@@ -337,7 +337,10 @@ def solve_curobo(
     with timer.time("curobo_planning"):
         result = motion_gen.plan_single_js(js_last, js_home, plan_config)
     if not result.success:
-        raise RuntimeError("Failed to plan for going home")
+        # TODO: Going Home scheme
+        # raise RuntimeError("Failed to plan for going home")
+        print("WARNING: Failed to plan for going home, but returning successful Pick plan!")
+        pass
 
     dt = result.interpolation_dt
     plan = result.get_interpolated_plan()

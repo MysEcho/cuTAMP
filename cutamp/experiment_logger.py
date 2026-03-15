@@ -46,8 +46,8 @@ class ExperimentLogger:
 
     def log_dict(self, name: str, data: dict) -> Path:
         path = self.exp_dir / f"{name}.json"
-        if path.exists():
-            raise ValueError(f"File {path} already exists")
+        # if path.exists():
+        #     raise ValueError(f"File {path} already exists")
         path.parent.mkdir(parents=True, exist_ok=True)
 
         # Save as JSON, YAML is too slow to load
