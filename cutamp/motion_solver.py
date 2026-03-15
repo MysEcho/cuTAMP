@@ -132,12 +132,13 @@ def solve_curobo(
                 approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
                 end_result = motion_gen.plan_single(approach_js, Pose.from_matrix(world_from_ee), plan_config)
                 if not end_result.success:
-                    _log.error(
-                        "Start state:",
-                        motion_gen.check_start_state(approach_js),
-                        motion_gen.check_constraints(approach_js),
-                    )
-                    _log.error("cuRobo result status:", end_result.status)
+                    # _log.error(
+                    #     "Start state:",
+                    #     motion_gen.check_start_state(approach_js),
+                    #     motion_gen.check_constraints(approach_js),
+                    # )
+                    _log.error(f"Start state: {motion_gen.check_start_state(approach_js)}, {motion_gen.check_constraints(approach_js)}")
+                    _log.error(f"cuRobo result status: {end_result.status}")
                     visualizer.set_joint_positions(approach_js.position[0])
                     raise RuntimeError(f"Failed to plan from approach to end for {ground_op.name}")
 
