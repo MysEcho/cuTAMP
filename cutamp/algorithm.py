@@ -33,6 +33,7 @@ from cutamp.tamp_world import TAMPWorld, check_tamp_world_not_in_collision
 from cutamp.task_planning import PlanSkeleton, task_plan_generator
 from cutamp.utils.timer import TorchTimer
 from cutamp.utils.visualizer import RerunVisualizer, MockVisualizer
+from imagine_tamp.tamp.cutamp_utils import cuTAMPUtilities
 
 _log = logging.getLogger(__name__)
 
@@ -101,6 +102,8 @@ def get_best_particle(
 
 
 def sample_plan_skeleton(
+    scene_config:dict, 
+    scene_mapping:dict,
     plan_gen,
     world: TAMPWorld,
     config: TAMPConfiguration,
@@ -118,6 +121,9 @@ def sample_plan_skeleton(
     plan_str = [op.name for op in plan_skeleton]
     _log.debug(f"[Plan {plan_count + 1}] Sampled plan {plan_str}")
 
+    # Static NBV Evaulation
+    static_nbv_cost, best_vp, best_orn = cuTAMPUtilities.sample_NBV_for_cutamp(env_metadata=(scene_config, scene_mapping), 
+                                                                               plan_skeleton=plan_skeleton, plan_str=plan_str)
     # Sample particles
     with timer.time("initialize_particles"):
         plan_particles = particle_initializer(plan_skeleton)
@@ -141,6 +147,9 @@ def sample_plan_skeleton(
         # Custom logic in stick button for breaking early for sampling baseline
         heuristic -= 100
         print(f"Found satisfying plan: {plan_str} heuristic -= 100")
+
+    # Apply NBV regularization to heuristic
+    heuristic += static_nbv_cost
 
     # Best cost initially
     with timer.time("compute_best_cost"):
@@ -283,6 +292,8 @@ def setup_cutamp(
 
 def run_cutamp(
     env: TAMPEnvironment,
+    scene_config:dict, 
+    scene_mapping:dict,
     config: TAMPConfiguration,
     cost_reducer: CostReducer,
     constraint_checker: ConstraintChecker,
@@ -314,8 +325,10 @@ def run_cutamp(
         for idx in range(config.num_initial_plans):
             try:
                 plan_info, has_solution = sample_plan_skeleton(
-                    plan_gen, world, config, timer, idx, constraint_checker, cost_reducer, particle_initializer
+                    scene_config, scene_mapping, plan_gen, world, config, timer, idx, constraint_checker, cost_reducer, particle_initializer
                 )
+                heuristic_cost = plan_info["heuristic"]
+                print(f"Heuristic Cost for current Step: {heuristic_cost}")
                 if plan_info is None:
                     _log.debug("failed subgraph, skipping...")
                     num_skipped_plans += 1
