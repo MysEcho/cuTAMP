@@ -16,6 +16,7 @@ from unittest.mock import Mock
 
 import torch
 from curobo.types.base import TensorDeviceType
+from curobo.types.math import Pose
 
 from cutamp.config import TAMPConfiguration, validate_tamp_config
 from cutamp.constraint_checker import ConstraintChecker
@@ -34,6 +35,7 @@ from cutamp.task_planning import PlanSkeleton, task_plan_generator
 from cutamp.utils.timer import TorchTimer
 from cutamp.utils.visualizer import RerunVisualizer, MockVisualizer
 from imagine_tamp.tamp.cutamp_utils import cuTAMPUtilities
+
 
 _log = logging.getLogger(__name__)
 
@@ -122,13 +124,59 @@ def sample_plan_skeleton(
     _log.debug(f"[Plan {plan_count + 1}] Sampled plan {plan_str}")
 
     # Static NBV Evaulation
-    static_nbv_cost, best_vp, best_orn = cuTAMPUtilities.sample_NBV_for_cutamp(env_metadata=(scene_config, scene_mapping), 
-                                                                               plan_skeleton=plan_skeleton, plan_str=plan_str)
+    # static_nbv_cost, best_vp, best_orn = cuTAMPUtilities.sample_NBV_for_cutamp(env_metadata=(scene_config, scene_mapping), 
+    #                                                                            plan_skeleton=plan_skeleton, plan_str=plan_str)
+
+    candidate_poses_list = cuTAMPUtilities.get_candidate_viewpoints(env_metadata=(scene_config, scene_mapping))
+
     # Sample particles
     with timer.time("initialize_particles"):
         plan_particles = particle_initializer(plan_skeleton)
     if plan_particles is None:  # failed subgraph
         return None, False
+    
+    # Dynamic NBV Candidate Viewpoints Injection
+    if candidate_poses_list is not None:
+        for op in plan_skeleton:
+            if op.name.startswith("Detect"):
+                _log.info("Distributing N candidate viewpoints across particles")
+                
+                params_str = op.name.split("(")[1].replace(")", "")
+                parsed_params = [p.strip() for p in params_str.split(",")]
+                pose_var_name = parsed_params[1] 
+                q_var_name = parsed_params[2]
+                
+                # list of N poses to a PyTorch tensor
+                candidate_tensor = torch.tensor(candidate_poses_list, dtype=torch.float32, device=world.device)
+                num_candidates = candidate_tensor.shape[0]
+                
+                # Distribute the N poses evenly across the 1024 particles
+                repeats = config.num_particles // num_candidates
+                remainder = config.num_particles % num_candidates
+                
+                pose_tensor_batch = torch.cat([
+                    candidate_tensor.repeat_interleave(repeats, dim=0),
+                    candidate_tensor[:remainder]
+                ], dim=0)
+                
+                # Overwrite the Cartesian target memory
+                plan_particles[pose_var_name] = pose_tensor_batch
+                
+                # Solve IK for the batch to give the GPU starting seeds
+
+                world_from_detect = Pose(
+                    position=pose_tensor_batch[:, :3], 
+                    quaternion=pose_tensor_batch[:, 3:]
+                ).get_matrix()
+                
+                world_from_ee = world_from_detect @ world.tool_from_ee
+                ik_result = world.ik_solver.solve_batch(Pose.from_matrix(world_from_ee), seed_config=None)
+                
+                # Overwrite the joint configuration memory
+                plan_particles[q_var_name] = ik_result.solution[:, 0]
+                
+                _log.info(f"Detect IK Success: {ik_result.success.sum().item()}/{config.num_particles}")
+                break
 
     # Rollout particles and compute costs
     rollout_fn = RolloutFunction(plan_skeleton, world, config)
@@ -149,7 +197,7 @@ def sample_plan_skeleton(
         print(f"Found satisfying plan: {plan_str} heuristic -= 100")
 
     # Apply NBV regularization to heuristic
-    heuristic += static_nbv_cost
+    # heuristic += static_nbv_cost
 
     # Best cost initially
     with timer.time("compute_best_cost"):
@@ -317,7 +365,7 @@ def run_cutamp(
         )
 
     # Isolation Test
-    cuTAMPUtilities.test_symbolic_task_planner(plan_gen, num_plans=10)
+    # cuTAMPUtilities.test_symbolic_task_planner(plan_gen, num_plans=10)
 
     # Sample initial plans and particles
     found_solution_initially = False

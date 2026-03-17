@@ -309,6 +309,40 @@ def solve_curobo(
         elif op_name == Push.name or op_name == PushStick.name:
             # TODO: implement motion solving for these operators
             raise NotImplementedError("Push and PushStick operations are not yet supported in cuRobo motion planning.")
+        
+        # Detect
+        elif op_name == "Detect":
+            obj, pose_name, q_name = ground_op.values
+            assert last_js is not None
+
+            with timer.time("curobo_planning"):
+                start_js = last_js
+                
+                # Grab the winning joint configuration that cuTAMP optimized for this viewpoint
+                target_q = best_particle[q_name].clone()
+                target_js = JointState.from_position(target_q[None])
+
+                # Ask cuRobo to generate a smooth, collision-free trajectory from 
+                # wherever the arm currently is, directly to the viewpoint
+                result = motion_gen.plan_single_js(start_js, target_js, plan_config)
+                
+                if not result.success:
+                    _log.error(f"Start state: {motion_gen.check_start_state(start_js)}")
+                    _log.error(f"Failed to plan to Detect pose. Status: {result.status}")
+                    raise RuntimeError(f"Failed to plan motion for {ground_op.name}")
+
+            dt = result.interpolation_dt
+            plan = result.get_interpolated_plan()
+            accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
+            
+            # Update tracker so the next action knows where the arm left off
+            last_js = JointState.from_position(plan[-1:].position)
+            ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+
+            # winning_pose = best_particle[pose_name].cpu().numpy()
+            # print("\n" + "="*40)
+            # print(f"Winning Viewpoint (xyz): {winning_pose[:3]}")
+            # print("="*40 + "\n")
 
         # Unsupported
         else:

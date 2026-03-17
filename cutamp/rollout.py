@@ -181,6 +181,33 @@ class RolloutFunction:
                 action_to_pose_ts[place_name] = pose_ts
                 ts_to_pose_ts[ts] = pose_ts
 
+            # Detect
+            elif op_name == "Detect":
+
+                # [obj, pose, q]
+                obj_name, pose_name, _ = ground_op.values
+
+                detect_pose_7d = particles[pose_name]
+
+                # 7D pose to 4x4 Transformation Matrix
+                from curobo.types.math import Pose
+
+                world_from_detect = Pose(
+                    position=detect_pose_7d[:, :3], 
+                    quaternion=detect_pose_7d[:, 3:]
+                ).get_matrix()
+
+                world_from_tool_desired.append(world_from_detect)
+                
+                # Don't close gripper during Detect Action
+                gripper_close.append(False) 
+                
+                action_params.append(pose_name)
+                action_to_ts[pose_name] = ts
+                
+                # pose_ts not incremented because Detect doesn't move any objects
+                action_to_pose_ts[pose_name] = pose_ts
+
             # Push
             elif op_name == Push.name:
                 button_name, pose_name, _ = ground_op.values

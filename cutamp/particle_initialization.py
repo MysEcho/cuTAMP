@@ -410,6 +410,33 @@ class ParticleInitializer:
                         "grasp": particles[grasp],
                     }
 
+            # Detect Action
+            elif op_name == "Detect":
+                obj, pose_name, q = params
+                if not world.has_object(obj):
+                    raise ValueError(f"{obj=} not found in world")
+                if pose_name in particles:
+                    raise ValueError(f"{pose_name=} shouldn't already be bound")
+                if q in particles:
+                    raise ValueError(f"{q=} shouldn't already be bound")
+
+                # Allocate empty memory for the Cartesian target (7D: x, y, z, qw, qz, qy, qz)
+                # Overridden by N tiled viewpoints while particle initialization
+                particles[pose_name] = torch.zeros(
+                    (num_particles, 7), 
+                    dtype=world.tensor_args.dtype, 
+                    device=world.tensor_args.device
+                )
+
+                # Allocate memory for joint configurations
+                # Overridden with the perfect IK solutions
+                particles[q] = sample_between_bounds(num_particles, world.robot_container.joint_limits)
+
+                if q in deferred_params:
+                    deferred_params.remove(q)
+                    
+                log_debug(f"{header}. Memory allocated for Detect. Awaiting NBV injection.")
+
             # Unknown
             else:
                 raise NotImplementedError(f"Unsupported operator {op_name}")
