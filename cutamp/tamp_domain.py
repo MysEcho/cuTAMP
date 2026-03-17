@@ -121,7 +121,11 @@ Detect = TAMPOperator(
     "Detect",
     [obj, pose, q],
     preconditions=[
-        At(q), HandEmpty(), IsMovable(obj), JustMoved(), HasNotPickedUp(obj),
+        At(q), 
+        HandEmpty(), 
+        IsMovable(obj), 
+        JustMoved(), 
+        HasNotPickedUp(obj),
     ],
     add_effects=[
         Localized(obj), 
