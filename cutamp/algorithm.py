@@ -315,6 +315,24 @@ def run_cutamp(
             operators=all_tamp_operators,
             explored_state_check=config.explored_state_check,
         )
+    
+    # Isolation Test
+    print("SYMBOLIC TASK PLANNER OUTPUT:")
+    
+    try:
+        plan_skeleton = next(plan_gen)
+        
+        plan_str = [op.name.split('(')[0] for op in plan_skeleton]
+        
+        print(f"Generated Plan Sequence: {plan_str}")
+        
+    except StopIteration:
+        print("Planner failed to find any logical sequence to reach the goal.")
+        
+    print("="*50 + "\n")
+    
+    import sys
+    sys.exit(0)
 
     # Sample initial plans and particles
     found_solution_initially = False

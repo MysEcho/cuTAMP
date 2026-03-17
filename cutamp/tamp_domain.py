@@ -53,6 +53,7 @@ IsSurface = Fluent("IsSurface", [Parameter("surface", Surface)])
 IsStick = Fluent("IsStick", [Parameter("obj", Movable)])
 HasNotPickedUp = Fluent("HasNotPickedUp", [Parameter("obj", Movable)])
 On = Fluent("On", [Parameter("obj", Movable), Parameter("surface", Surface)])
+Localized = Fluent("Localized", [Parameter("obj", Movable)])
 
 all_tamp_fluents = [
     At,
@@ -70,6 +71,7 @@ all_tamp_fluents = [
     IsStick,
     HasNotPickedUp,
     On,
+    Localized,
 ]
 
 
@@ -115,6 +117,23 @@ MoveHolding = TAMPOperator(
     costs=[TrajectoryLength(q_start, traj, q_end)],
 )
 
+Detect = TAMPOperator(
+    "Detect",
+    [obj, pose, q],
+    preconditions=[
+        At(q), HandEmpty(), IsMovable(obj), JustMoved(), HasNotPickedUp(obj),
+    ],
+    add_effects=[
+        Localized(obj), 
+        CanMove(),       
+    ],
+    del_effects=[
+        JustMoved()      # MoveFree before Pick
+    ],
+    constraints=[KinematicConstraint(q, pose)],
+    costs=[],
+)
+
 
 Pick = TAMPOperator(
     "Pick",
@@ -125,6 +144,7 @@ Pick = TAMPOperator(
         IsMovable(obj),
         JustMoved(),
         HasNotPickedUp(obj),
+        Localized(obj),
     ],
     add_effects=[
         Holding(obj),
@@ -197,7 +217,7 @@ PushStick = TAMPOperator(
     costs=[],
 )
 
-all_tamp_operators = [MoveFree, MoveHolding, Pick, Place, Push, PushStick]
+all_tamp_operators = [MoveFree, MoveHolding, Detect, Pick, Place, Push, PushStick]
 
 
 def get_initial_state(
