@@ -31,7 +31,7 @@ from cutamp.robots import get_q_home, load_robot_container
 from cutamp.rollout import RolloutFunction
 from cutamp.tamp_domain import all_tamp_operators
 from cutamp.tamp_world import TAMPWorld, check_tamp_world_not_in_collision
-from cutamp.task_planning import PlanSkeleton, task_plan_generator
+from cutamp.task_planning import PlanSkeleton, task_plan_generator, get_top_k_plan_skeletons
 from cutamp.utils.timer import TorchTimer
 from cutamp.utils.visualizer import RerunVisualizer, MockVisualizer
 from imagine_tamp.tamp.cutamp_utils import cuTAMPUtilities
@@ -356,6 +356,7 @@ def run_cutamp(
     # Task plan generator
     _log.info(f"Initial State: {world.initial_state}")
     _log.info(f"Goal State: {world.goal_state}")
+
     with timer.time("get_plan_generator", log_callback=_log.info):
         plan_gen = task_plan_generator(
             world.initial_state,
@@ -364,8 +365,19 @@ def run_cutamp(
             explored_state_check=config.explored_state_check,
         )
 
+    # Retrieve top K Plan skeletons
+    K = 5
+    with timer.time("get_top_k_plans", log_callback=_log.info):
+        top_k_skeletons = get_top_k_plan_skeletons(
+            world.initial_state,
+            world.goal_state,
+            operators=all_tamp_operators,
+            k=K,
+            explored_state_check=config.explored_state_check,
+        )
+
     # Isolation Test
-    # cuTAMPUtilities.test_symbolic_task_planner(plan_gen, num_plans=10)
+    # cuTAMPUtilities.test_symbolic_task_planner(top_k_skeletons)
 
     # Sample initial plans and particles
     found_solution_initially = False

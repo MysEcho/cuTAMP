@@ -7,7 +7,7 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-from typing import Sequence
+from typing import Sequence, List
 
 from .base_structs import Atom, Fluent, GroundOperator, Operator, Parameter, State
 from .tamp_structs import Constraint, Cost, GroundTAMPOperator, PlanSkeleton, TAMPOperator
@@ -29,3 +29,26 @@ def task_plan_generator(
             yield plan
         except StopIteration:
             break
+
+def get_top_k_plan_skeletons(
+    initial: State,
+    goal: State,
+    operators: Sequence[Operator],
+    k: int = 5,
+    explored_state_check: bool = True,
+) -> List[PlanSkeleton]:
+    """
+    Retrieve top K plan skeletons.
+    """
+    plan_iter = breadth_first_search(initial, goal, operators, explored_state_check=explored_state_check)
+    
+    top_k_plans = []
+    
+    for _ in range(k):
+        try:
+            plan = next(plan_iter)
+            top_k_plans.append(plan)
+        except StopIteration:
+            break
+            
+    return top_k_plans
