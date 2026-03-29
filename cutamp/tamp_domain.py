@@ -54,6 +54,7 @@ IsStick = Fluent("IsStick", [Parameter("obj", Movable)])
 HasNotPickedUp = Fluent("HasNotPickedUp", [Parameter("obj", Movable)])
 On = Fluent("On", [Parameter("obj", Movable), Parameter("surface", Surface)])
 Localized = Fluent("Localized", [Parameter("obj", Movable)])
+Uncertain = Fluent("Uncertain", [Parameter("obj", Movable)])
 
 all_tamp_fluents = [
     At,
@@ -72,6 +73,7 @@ all_tamp_fluents = [
     HasNotPickedUp,
     On,
     Localized,
+    Uncertain,
 ]
 
 
@@ -126,13 +128,15 @@ Detect = TAMPOperator(
         IsMovable(obj), 
         JustMoved(), 
         HasNotPickedUp(obj),
+        Uncertain(obj),
     ],
     add_effects=[
         Localized(obj), 
         CanMove(),       
     ],
     del_effects=[
-        JustMoved()      # MoveFree before Pick
+        JustMoved(),      # MoveFree before Pick
+        Uncertain(obj)
     ],
     constraints=[KinematicConstraint(q, pose)],
     costs=[],
@@ -232,6 +236,7 @@ def get_initial_state(
     for movable in movables:
         initial_state.add(IsMovable.ground(movable))
         initial_state.add(HasNotPickedUp.ground(movable))
+        initial_state.add(Uncertain.ground(movable))
 
     for surface in surfaces:
         initial_state.add(IsSurface.ground(surface))
@@ -240,6 +245,7 @@ def get_initial_state(
         initial_state.add(IsStick.ground(stick))
         initial_state.add(IsMovable.ground(stick))
         initial_state.add(HasNotPickedUp.ground(stick))
+        initial_state.add(Uncertain.ground(stick))
 
     for button in buttons:
         initial_state.add(IsButton.ground(button))
