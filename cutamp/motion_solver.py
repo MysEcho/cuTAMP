@@ -69,6 +69,7 @@ def solve_curobo(
     approach_offset[2, 3] = -0.05
 
     # Accumulated plans we return that the real robot can actually execute
+    last_op_type = None
     accum_plans = []
 
     # Iterate through skeleton and motion plan
@@ -82,6 +83,7 @@ def solve_curobo(
             if traj in best_particle:
                 raise NotImplementedError("Trajectories not supported yet")
             last_q_name = q_start
+            pass
 
         # MoveHolding
         elif op_name == MoveHolding.name:
@@ -99,7 +101,7 @@ def solve_curobo(
                 start_js = last_js
 
                 # Get the retract pose and plan to it if it's not q0
-                if last_q_name != "q0":
+                if last_q_name != "q0" and last_op_type != "Detect":
                     world_from_ee = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
                     world_from_retract = world_from_ee @ approach_offset
                     retract_result = motion_gen.plan_single(start_js, Pose.from_matrix(world_from_retract), plan_config)
@@ -338,11 +340,12 @@ def solve_curobo(
             # Update tracker so the next action knows where the arm left off
             last_js = JointState.from_position(plan[-1:].position)
             ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+            last_op_type = "Detect"
 
-            # winning_pose = best_particle[pose_name].cpu().numpy()
-            # print("\n" + "="*40)
-            # print(f"Winning Viewpoint (xyz): {winning_pose[:3]}")
-            # print("="*40 + "\n")
+            winning_pose = best_particle[pose_name].cpu().numpy()
+            print("\n" + "="*40)
+            print(f"Winning Viewpoint (xyz): {winning_pose[:3]}")
+            print("="*40 + "\n")
 
         # Unsupported
         else:
@@ -384,4 +387,4 @@ def solve_curobo(
     _log.debug("Planned to go home")
 
     _log.info(f"Motion planning metrics: {timer.get_summary('curobo_planning')}")
-    return accum_plans
+    return accum_plans, winning_pose

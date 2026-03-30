@@ -524,7 +524,7 @@ def run_cutamp(
             if metrics["best_soft_cost"] is not None:
                 overall_metrics["best_soft_cost"] = min(overall_metrics["best_soft_cost"], metrics["best_soft_cost"])
             if time_exceeded:
-                _log.info(f"Max loop duration reached, stopping optimization")
+                _log.info("Max loop duration reached, stopping optimization")
                 should_break = True
             exp_logger.log_dict(f"optimization/opt_{opt_iter:04d}", metrics)
             if has_satisfying:
@@ -544,7 +544,7 @@ def run_cutamp(
                 timer.start("resample_duration")
                 for resample_idx in range(config.num_resampling_attempts):
                     if config.max_loop_dur is not None and timer.elapsed("start_optimization") >= config.max_loop_dur:
-                        _log.info(f"Max loop duration reached, stopping resampling")
+                        _log.info("Max loop duration reached, stopping resampling")
                         should_break = True
                         break
                     timer.start("resample_plan_info")
@@ -587,7 +587,7 @@ def run_cutamp(
                     best_soft_idx = plan_info["best_soft_idx"]
                     if best_soft_idx is None:
                         best_soft_idx = 0
-                    visualizer.set_time_sequence(f"samp", num_resample_attempts)
+                    visualizer.set_time_sequence("samp", num_resample_attempts)
                     q_last = rollout["confs"][best_soft_idx, -1].tolist()
                     visualizer.set_joint_positions(q_last)
                     for obj in rollout["obj_to_pose"]:
@@ -629,7 +629,7 @@ def run_cutamp(
             # Log best particle as last
             if best_particle is not None:
                 rollout = plan_info["rollout_fn"]({k: v[None] for k, v in best_particle.items()})
-                visualizer.set_time_sequence(f"samp", num_resample_attempts)
+                visualizer.set_time_sequence("samp", num_resample_attempts)
                 q_last = rollout["confs"][0, -1].tolist()
                 visualizer.set_joint_positions(q_last)
 
@@ -642,7 +642,7 @@ def run_cutamp(
         if has_satisfying:
             found_solution = True
             if config.curobo_plan:
-                curobo_plan = solve_curobo(
+                curobo_plan, winning_pose = solve_curobo(
                     plan_info,
                     best_particle,
                     world,
@@ -680,4 +680,4 @@ def run_cutamp(
     # Log constraint and cost multipliers
     exp_logger.log_dict("multipliers", cost_reducer.cost_config)
     exp_logger.log_dict("tolerances", constraint_checker.constraint_config)
-    return curobo_plan, overall_metrics["num_satisfying_final"]
+    return curobo_plan, winning_pose, overall_metrics["num_satisfying_final"]
