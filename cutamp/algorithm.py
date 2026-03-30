@@ -11,7 +11,7 @@
 
 import logging
 from datetime import datetime
-from typing import List, Union, Optional, Tuple
+from typing import List, Union, Optional, Tuple, Any, Iterator
 from unittest.mock import Mock
 
 import torch
@@ -103,12 +103,71 @@ def get_best_particle(
     best_particle = {k: v[best_idx].detach().clone() for k, v in particles.items()}
     return best_particle
 
+def yield_optimistic_skeletons(
+    top_k_skeletons: List,
+    global_belief:BeliefManager, 
+    scene_config: dict,
+    scene_mapping: dict,
+    penalize_longer_plans:bool=False,
+) -> Iterator[Tuple[Any, List]]:
+    """
+    Evaluates Top K skeletons using optimistic visibility math, sorts them by cost,
+    and yields them one by one (best plan first).
+    """
+    print("\n" + "="*50)
+    print("TASK LEVEL: Evaluating and Sorting Top K Skeletons")
+    print("="*50)
+
+    # Sample candidate NBV viewpoints once
+    print("[Global Eval] Sampling candidate viewpoints for current belief state...")
+    
+    optimistic_NBV_cost, master_candidate_poses = cuTAMPUtilities.sample_NBV_for_cutamp(
+        global_belief=global_belief,
+        env_metadata=(scene_config, scene_mapping),
+        plan_skeleton=top_k_skeletons[0], 
+        plan_str="Global Scene Evaluation"
+    )
+
+    scored_skeletons = []
+    action_penalty = 0
+    longer_plan_penalty = 5
+
+    # Sort the top-k plan skeletons
+    for idx, skeleton in enumerate(top_k_skeletons):
+        plan_str = " -> ".join([op.name for op in skeleton])
+        
+        # Penalize longer plans 
+        if penalize_longer_plans:
+            action_penalty = len(skeleton) * longer_plan_penalty
+        
+        # Add the global visibility cost
+        total_task_cost = action_penalty + optimistic_NBV_cost
+
+        print(f"[Task Eval] Skeleton {idx+1} | Length: {action_penalty} | Vis Cost: {optimistic_NBV_cost:.2f} | Total: {total_task_cost:.2f}")
+        
+        scored_skeletons.append({
+            "skeleton": skeleton,
+            "cost": total_task_cost,
+            "plan_str": plan_str
+        })
+
+    # Sort from lowest cost to highest cost
+    scored_skeletons.sort(key=lambda x: x["cost"])
+
+    print("="*50)
+    print(f"Successfully ranked {len(scored_skeletons)} plans.")
+    print("="*50 + "\n")
+
+    for rank, item in enumerate(scored_skeletons):
+        print(f"\n[Generator] Yielding Rank {rank+1} Plan (Task Cost: {item['cost']:.2f})")
+        print(f"Sequence: {item['plan_str']}")
+        
+        yield item["skeleton"], master_candidate_poses
+
 
 def sample_plan_skeleton(
-    scene_config:dict, 
-    scene_mapping:dict,
-    global_belief:BeliefManager,
-    plan_skeleton,  
+    plan_skeleton,
+    candidate_poses_list:List,  
     world: TAMPWorld,
     config: TAMPConfiguration,
     timer: TorchTimer,
@@ -124,13 +183,6 @@ def sample_plan_skeleton(
     
     plan_str = [op.name for op in plan_skeleton]
     _log.debug(f"[Plan {plan_count + 1}] Evaluating plan {plan_str}")
-
-    optimistic_NBV_cost, candidate_poses_list = cuTAMPUtilities.sample_NBV_for_cutamp(
-        global_belief=global_belief,
-        env_metadata=(scene_config, scene_mapping), 
-        plan_skeleton=plan_skeleton, 
-        plan_str=plan_str
-    )
 
     # Sample particles
     with timer.time("initialize_particles"):
@@ -197,9 +249,6 @@ def sample_plan_skeleton(
         # Custom logic in stick button for breaking early for sampling baseline
         heuristic -= 100
         print(f"Found satisfying plan: {plan_str} heuristic -= 100")
-
-    # Apply NBV regularization to heuristic
-    heuristic += optimistic_NBV_cost
 
     # Best cost initially
     with timer.time("compute_best_cost"):
@@ -351,7 +400,7 @@ def run_cutamp(
     experiment_id: Optional[str] = None,
 ):
     """Overall cuTAMP algorithm implementation."""
-    # Setup all the things and load the world
+
     exp_logger, visualizer, timer, world = setup_cutamp(env, config, q_init, experiment_id)
     particle_initializer = ParticleInitializer(world, config)
 
@@ -359,16 +408,17 @@ def run_cutamp(
     _log.info(f"Initial State: {world.initial_state}")
     _log.info(f"Goal State: {world.goal_state}")
 
-    with timer.time("get_plan_generator", log_callback=_log.info):
-        plan_gen = task_plan_generator(
-            world.initial_state,
-            world.goal_state,
-            operators=all_tamp_operators,
-            explored_state_check=config.explored_state_check,
-        )
+    # Yield one plan at a time(original cuTAMP)
+    # with timer.time("get_plan_generator", log_callback=_log.info):
+    #     plan_gen = task_plan_generator(
+    #         world.initial_state,
+    #         world.goal_state,
+    #         operators=all_tamp_operators,
+    #         explored_state_check=config.explored_state_check,
+    #     )
 
     # Retrieve top K Plan skeletons
-    K = 50
+    K = 30
     with timer.time("get_top_k_plans", log_callback=_log.info):
         top_k_skeletons = get_top_k_plan_skeletons(
             world.initial_state,
@@ -381,44 +431,41 @@ def run_cutamp(
     # Isolation Test
     # cuTAMPUtilities.test_symbolic_task_planner(top_k_skeletons)
 
-    # Score all Top-K Skeletons
+    # Select Best skeleton based on Optimistic NBV simulation
+    with timer.time("optimistic_evaluation"):
+        optimistic_plan_gen= yield_optimistic_skeletons(
+            top_k_skeletons, global_belief, scene_config, scene_mapping
+        )
+
+    # Heuristic Evaluation
+    # Sample initial plans and particles
     found_solution_initially = False
     num_skipped_plans = 0
-    plan_queue: List[dict] = []
-    
     with timer.time("sample_initial_plans", log_callback=_log.info):
-        for idx, skeleton in enumerate(top_k_skeletons):
+        plan_queue: List[dict] = []
+        plan_count = 0
+        for idx in range(config.num_initial_plans):
             try:
+                plan_gen, candidate_poses_list = next(optimistic_plan_gen)
                 plan_info, has_solution = sample_plan_skeleton(
-                    scene_config, scene_mapping, global_belief, skeleton, world, config, timer, idx, constraint_checker, cost_reducer, particle_initializer
+                    plan_gen, candidate_poses_list, world, config, timer, idx, constraint_checker, cost_reducer, particle_initializer
                 )
-                
                 if plan_info is None:
-                    _log.debug(f"Skeleton {idx} failed subgraph, skipping...")
+                    _log.debug("failed subgraph, skipping...")
                     num_skipped_plans += 1
                     continue
-                    
-                heuristic_cost = plan_info["heuristic"]
-                plan_str = " -> ".join([op.name for op in skeleton])
-                print(f"[Evaluation] Skeleton {idx+1} | Cost: {heuristic_cost:.2f} | Plan: {plan_str}")
-                
-                plan_queue.append(plan_info)
-                
-                if has_solution:
-                    found_solution_initially = True
-                    
-            except Exception as e:
-                _log.error(f"Error sampling skeleton {idx}: {e}")
-                num_skipped_plans += 1
-                continue
+            except StopIteration:
+                _log.info("Ran out of plans to sample")
+                break
+            plan_queue.append(plan_info)
+            if has_solution:
+                found_solution_initially = True
+                break
+            plan_count += 1
 
-    if not plan_queue:
-        raise RuntimeError("Failed to evaluate any valid plan skeletons from the Top-K list.")
-
-    # Sort and Isolate the Best Skeleton
+    # Sort plans by heuristic
     def sort_plans():
         with timer.time("sort_plans"):
-            # Sorts lowest heuristic to the top
             plan_queue.sort(key=lambda x: x["heuristic"])
 
     sort_plans()
