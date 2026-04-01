@@ -78,11 +78,42 @@ def solve_curobo(
 
         # MoveFree, defer motion planning to pick to use object pose instead of planning from q_start to q_end.
         # This works more reliably and gives higher quality motions.
+        # if op_name == MoveFree.name:
+        #     q_start, traj, q_end = ground_op.values
+        #     if traj in best_particle:
+        #         raise NotImplementedError("Trajectories not supported yet")
+        #     last_q_name = q_start
+        #     pass
+
         if op_name == MoveFree.name:
             q_start, traj, q_end = ground_op.values
-            if traj in best_particle:
-                raise NotImplementedError("Trajectories not supported yet")
-            last_q_name = q_start
+            if q_end in best_particle:
+                with timer.time("curobo_planning"):
+                    start_js = last_js
+                    target_q = best_particle[q_end].clone()
+                    target_js = JointState.from_position(target_q[None])
+
+                    result = motion_gen.plan_single_js(start_js, target_js, plan_config)
+                    
+                    if not result.success:
+                        _log.error(f"Failed to plan MoveFree to {q_end}. Status: {result.status}")
+                        raise RuntimeError(f"Failed to plan motion for {ground_op.name}")
+
+                dt = result.interpolation_dt
+                plan = result.get_interpolated_plan()
+                accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
+                
+                last_js = JointState.from_position(plan[-1:].position)
+                ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+                
+                last_q_name = q_end
+                last_op_type = "MoveFree"
+                
+            else:
+                # If q_end is unknown, it's a generic approach for a Pick/Place.
+                # Defer the motion planning to the Pick action.
+                last_q_name = q_start
+
             pass
 
         # MoveHolding
@@ -317,35 +348,16 @@ def solve_curobo(
             obj, pose_name, q_name = ground_op.values
             assert last_js is not None
 
-            with timer.time("curobo_planning"):
-                start_js = last_js
-                
-                # Grab the winning joint configuration that cuTAMP optimized for this viewpoint
-                target_q = best_particle[q_name].clone()
-                target_js = JointState.from_position(target_q[None])
-
-                # Ask cuRobo to generate a smooth, collision-free trajectory from 
-                # wherever the arm currently is, directly to the viewpoint
-                result = motion_gen.plan_single_js(start_js, target_js, plan_config)
-                
-                if not result.success:
-                    _log.error(f"Start state: {motion_gen.check_start_state(start_js)}")
-                    _log.error(f"Failed to plan to Detect pose. Status: {result.status}")
-                    raise RuntimeError(f"Failed to plan motion for {ground_op.name}")
-
-            dt = result.interpolation_dt
-            plan = result.get_interpolated_plan()
-            accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
+            # TODO: Add camera callback
             
-            # Update tracker so the next action knows where the arm left off
-            last_js = JointState.from_position(plan[-1:].position)
-            ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+            winning_pose = best_particle[pose_name].cpu().numpy()
+            
+            print("\n" + "="*40)
+            print(f"Executing Detect -> Camera shutter triggered at (xyz): {winning_pose[:3]}")
+            print("="*40 + "\n")
+
             last_op_type = "Detect"
 
-            winning_pose = best_particle[pose_name].cpu().numpy()
-            print("\n" + "="*40)
-            print(f"Winning Viewpoint (xyz): {winning_pose[:3]}")
-            print("="*40 + "\n")
 
         # Unsupported
         else:

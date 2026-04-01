@@ -141,6 +141,11 @@ def yield_optimistic_skeletons(
             action_penalty = len(skeleton) * longer_plan_penalty
         
         # Add the global visibility cost
+        # We need to make sure that optimistic costs are added based on the actions that are present in the skeleton. For eg.,
+        # NBV cost will only be added to plans having Detect action.
+        # NOTE: Currently every plan will start with MoveFree -> Detect so we need to apply these costs first, execute the plan, update belief
+        # and then execute the rest of the plan with newer optimistic cost and then figure out which skeleton is the best. This has to be done
+        # on a receding horizon basis.
         total_task_cost = action_penalty + optimistic_NBV_cost
 
         print(f"[Task Eval] Skeleton {idx+1} | Length: {action_penalty} | Vis Cost: {optimistic_NBV_cost:.2f} | Total: {total_task_cost:.2f}")
@@ -434,7 +439,7 @@ def run_cutamp(
     # Select Best skeleton based on Optimistic NBV simulation
     with timer.time("optimistic_evaluation"):
         optimistic_plan_gen= yield_optimistic_skeletons(
-            top_k_skeletons, global_belief, scene_config, scene_mapping
+            top_k_skeletons, global_belief, scene_config, scene_mapping, penalize_longer_plans=True
         )
 
     # Heuristic Evaluation
