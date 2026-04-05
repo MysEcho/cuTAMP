@@ -434,7 +434,7 @@ def run_cutamp(
         )
 
     # Isolation Test
-    # cuTAMPUtilities.test_symbolic_task_planner(top_k_skeletons)
+    # cuTAMPUtilities.test_symbolic_task_planner(top_k_skeletons,verbose=True)
 
     # Select Best skeleton based on Optimistic NBV simulation
     with timer.time("optimistic_evaluation"):
