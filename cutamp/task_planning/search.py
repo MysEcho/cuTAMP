@@ -167,6 +167,46 @@ def get_valid_ground_operators(
 
     return ground_ops
 
+def is_illogical_action(node: _Node, proposed_op: GroundOperator) -> bool:
+    """
+    In-search pruning rule to force interleaved planning.
+    Kills branches instantly if the planner tries to hoard Detects 
+    or Pick the wrong object.
+    """
+    proposed_name = proposed_op.operator.name
+    
+    # Actively restrict Detect and Pick actions
+    if proposed_name not in ["Detect", "Pick"]:
+        return False
+        
+    proposed_target = proposed_op.values[0] if proposed_op.values else None
+
+    # Find the last meaningful physical action
+    curr = node
+    last_action_name = None
+    last_action_target = None
+    
+    while curr is not None and curr.operator is not None:
+        op_name = curr.operator.operator.name
+        # Ignore transit actions to see what the robot did last
+        if op_name not in ["MoveFree", "MoveHolding"]:
+            last_action_name = op_name
+            last_action_target = curr.operator.values[0] if curr.operator.values else None
+            break
+        curr = curr.parent
+
+    # No Stacking Detects
+    if proposed_name == "Detect":
+        if last_action_name == "Detect":
+            return True 
+            
+    # Pick what has been detected
+    elif proposed_name == "Pick":
+        if last_action_name == "Detect" and last_action_target != proposed_target:
+            return True 
+
+    return False
+
 
 def breadth_first_search(
     initial_state: State,
@@ -224,6 +264,11 @@ def breadth_first_search(
         # Get successor and add to frontier
         ground_ops = get_valid_ground_operators(node, operators, verbose=verbose)
         for ground_op in ground_ops:
+
+            if is_illogical_action(node, ground_op):
+                continue
+
+        
             successor_state = ground_op.apply(node.state)
 
             # If the successor state hasn't been explored, add it to the frontier.
