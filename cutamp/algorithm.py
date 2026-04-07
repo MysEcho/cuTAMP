@@ -36,7 +36,7 @@ from cutamp.utils.timer import TorchTimer
 from cutamp.utils.visualizer import RerunVisualizer, MockVisualizer
 from imagine_tamp.tamp.cutamp_utils import cuTAMPUtilities
 from imagine_tamp.tamp.belief import BeliefManager
-
+from tqdm import tqdm 
 
 _log = logging.getLogger(__name__)
 
@@ -110,15 +110,17 @@ def yield_optimistic_skeletons(
     scene_mapping: dict,
     world: TAMPWorld,
     penalize_longer_plans: bool = False,
+    verbose:bool = False,
 ) -> Iterator[Tuple[Any, List]]:
     """
     Evaluates Top K skeletons using optimistic heuristic costs.
     Calculates Effort Cost + Optimistic Visibility Cost.
     TODO: Add Placement and Grasp Optimistic subgoals.
     """
-    print("\n" + "="*60)
-    print("TASK LEVEL: Optimistic Heuristic Evaluation")
-    print("="*60)
+    if verbose:
+        print("\n" + "="*60)
+        print("TASK LEVEL: Optimistic Heuristic Evaluation")
+        print("="*60)
 
     scored_skeletons = []
     
@@ -134,7 +136,9 @@ def yield_optimistic_skeletons(
         except:
             return [0.0, 0.0, 0.0]
 
-    for idx, skeleton in enumerate(top_k_skeletons):
+    pbar = tqdm(enumerate(top_k_skeletons), total=len(top_k_skeletons), desc="Evaluating Skeletons")
+
+    for idx, skeleton in pbar:
         plan_str = " -> ".join([op.name for op in skeleton])
         
         # Virtual State Trackers for this specific skeleton
@@ -142,12 +146,13 @@ def yield_optimistic_skeletons(
         optimistic_NBV_cost = 0.0
         candidate_poses = None
         
-        # Hardcoded currently from iterface
+        # Hardcoded currently from interface
         current_ee_xyz = [0.0, 0.0, 0.9] 
 
         objects_moved = set()
 
-        print(f"[EVAL]Plan Sequence {idx + 1}: {plan_str}")
+        if verbose:
+            print(f"\n[EVAL]Plan Sequence {idx + 1}: {plan_str}")
 
         # Simulate the sequence to accumulate costs
         for op in skeleton:
@@ -176,7 +181,8 @@ def yield_optimistic_skeletons(
                     env_metadata=(scene_config, scene_mapping),
                     plan_skeleton=skeleton, 
                     plan_str=plan_str,
-                    ignore_objects=objects_to_ignore 
+                    ignore_objects=objects_to_ignore,
+                    verbose=verbose,
                 )
                 optimistic_NBV_cost = vis_cost
                 candidate_poses = master_candidate_poses
@@ -195,7 +201,15 @@ def yield_optimistic_skeletons(
         
         total_task_cost = total_effort_cost + total_vis_cost
 
-        print(f"[Task Eval] Skeleton {idx+1} | Length: {len(skeleton)} | Effort: {total_effort_cost:.2f} | Vis: {total_vis_cost:.2f} | Total: {total_task_cost:.2f}")
+        if verbose:
+            print(f"[Task Eval] Skeleton {idx+1} | Length: {len(skeleton)} | Effort: {total_effort_cost:.2f} | Vis: {total_vis_cost:.2f} | Total: {total_task_cost:.2f}")
+        
+        pbar.set_postfix(
+            Skel=idx+1,
+            Effort=f"{total_effort_cost:.2f}",
+            Vis=f"{total_vis_cost:.2f}",
+            Total=f"{total_task_cost:.2f}"
+        )
         
         scored_skeletons.append({
             "skeleton": skeleton,
@@ -207,13 +221,15 @@ def yield_optimistic_skeletons(
     # Sort from lowest combined cost to highest
     scored_skeletons.sort(key=lambda x: x["cost"])
 
-    print("="*60)
-    print(f"Successfully ranked {len(scored_skeletons)} plans.")
-    print("="*60 + "\n")
+    if verbose:
+        print("\n" + "="*60)
+        print(f"Successfully ranked {len(scored_skeletons)} plans.")
+        print("="*60 + "\n")
 
     for rank, item in enumerate(scored_skeletons):
-        print(f"\n[Generator] Yielding Rank {rank+1} Plan (Task Cost: {item['cost']:.2f})")
-        print(f"Sequence: {item['plan_str']}")
+        if verbose:
+            print(f"\n[Generator] Yielding Rank {rank+1} Plan (Task Cost: {item['cost']:.2f})")
+            print(f"Sequence: {item['plan_str']}")
         
         yield item["cost"], item["skeleton"], item["candidate_poses"]
 
@@ -451,6 +467,7 @@ def run_cutamp(
     constraint_checker: ConstraintChecker,
     q_init: Optional[List[float]] = None,
     experiment_id: Optional[str] = None,
+    verbose:bool = False,
 ):
     """Overall cuTAMP algorithm implementation."""
 
@@ -487,7 +504,7 @@ def run_cutamp(
     # Select Best skeleton based on Optimistic NBV simulation
     with timer.time("optimistic_evaluation"):
         optimistic_plan_gen= yield_optimistic_skeletons(
-            top_k_skeletons, global_belief, scene_config, scene_mapping, world, penalize_longer_plans=False
+            top_k_skeletons, global_belief, scene_config, scene_mapping, world, penalize_longer_plans=False, verbose=verbose,
         )
 
     # Heuristic Evaluation
