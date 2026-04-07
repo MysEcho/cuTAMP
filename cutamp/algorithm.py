@@ -105,69 +105,117 @@ def get_best_particle(
 
 def yield_optimistic_skeletons(
     top_k_skeletons: List,
-    global_belief:BeliefManager, 
+    global_belief: BeliefManager, 
     scene_config: dict,
     scene_mapping: dict,
-    penalize_longer_plans:bool=False,
+    world: TAMPWorld,
+    penalize_longer_plans: bool = False,
 ) -> Iterator[Tuple[Any, List]]:
     """
-    Evaluates Top K skeletons using optimistic visibility math, sorts them by cost,
-    and yields them one by one (best plan first).
+    Evaluates Top K skeletons using optimistic heuristic costs.
+    Calculates Effort Cost + Optimistic Visibility Cost.
+    TODO: Add Placement and Grasp Optimistic subgoals.
     """
-    print("\n" + "="*50)
-    print("TASK LEVEL: Evaluating and Sorting Top K Skeletons")
-    print("="*50)
-
-    # Sample candidate NBV viewpoints once
-    print("[Global Eval] Sampling candidate viewpoints for current belief state...")
-    
-    optimistic_NBV_cost, master_candidate_poses = cuTAMPUtilities.sample_NBV_for_cutamp(
-        global_belief=global_belief,
-        env_metadata=(scene_config, scene_mapping),
-        plan_skeleton=top_k_skeletons[0], 
-        plan_str="Global Scene Evaluation"
-    )
+    print("\n" + "="*60)
+    print("TASK LEVEL: Optimistic Heuristic Evaluation")
+    print("="*60)
 
     scored_skeletons = []
-    action_penalty = 0
-    longer_plan_penalty = 5
+    
+    # Heuristic Weights 
+    WEIGHT_EFFORT = 1.0
+    WEIGHT_VISIBILITY = 2.5 
+    longer_plan_penalty = 5.0
 
-    # Sort the top-k plan skeletons
+    # Helper function to extract XYZ from world state
+    def get_obj_xyz(obj_name: str):
+        try:
+            return world.get_object(obj_name).pose[0:3]
+        except:
+            return [0.0, 0.0, 0.0]
+
     for idx, skeleton in enumerate(top_k_skeletons):
         plan_str = " -> ".join([op.name for op in skeleton])
         
-        # Penalize longer plans 
-        if penalize_longer_plans:
-            action_penalty = len(skeleton) * longer_plan_penalty
+        # Virtual State Trackers for this specific skeleton
+        effort_distance = 0.0
+        optimistic_NBV_cost = 0.0
+        candidate_poses = None
         
-        # Add the global visibility cost
-        # We need to make sure that optimistic costs are added based on the actions that are present in the skeleton. For eg.,
-        # NBV cost will only be added to plans having Detect action.
-        # NOTE: Currently every plan will start with MoveFree -> Detect so we need to apply these costs first, execute the plan, update belief
-        # and then execute the rest of the plan with newer optimistic cost and then figure out which skeleton is the best. This has to be done
-        # on a receding horizon basis.
-        total_task_cost = action_penalty + optimistic_NBV_cost
+        # Hardcoded currently from iterface
+        current_ee_xyz = [0.0, 0.0, 0.9] 
 
-        print(f"[Task Eval] Skeleton {idx+1} | Length: {action_penalty} | Vis Cost: {optimistic_NBV_cost:.2f} | Total: {total_task_cost:.2f}")
+        objects_moved = set()
+
+        print(f"[EVAL]Plan Sequence {idx + 1}: {plan_str}")
+
+        # Simulate the sequence to accumulate costs
+        for op in skeleton:
+            
+            op_base_name = op.operator.name if hasattr(op, 'operator') else op.name
+            
+            if "Pick" in op_base_name:
+                target_obj = op.values[0]
+                objects_moved.add(target_obj) # Track what we are moving
+                obj_xyz = get_obj_xyz(target_obj)
+                
+                # Euclidean distance from current arm position to the object
+                dist = torch.linalg.norm(torch.tensor(current_ee_xyz) - torch.tensor(obj_xyz)).item()
+                effort_distance += dist
+                current_ee_xyz = obj_xyz # Update virtual arm position(No IK is calculated, this is just meant to be heuristic.)
+                
+            # Compute visibility by running raycaster on the updated virtual scene
+            elif "Detect" in op_base_name:
+                target = op.values[0]
+                
+                # Ignore everything that was moved, except the target itself
+                objects_to_ignore = list(objects_moved - {target})
+                
+                vis_cost, master_candidate_poses = cuTAMPUtilities.sample_NBV_for_cutamp(
+                    global_belief=global_belief,
+                    env_metadata=(scene_config, scene_mapping),
+                    plan_skeleton=skeleton, 
+                    plan_str=plan_str,
+                    ignore_objects=objects_to_ignore 
+                )
+                optimistic_NBV_cost = vis_cost
+                candidate_poses = master_candidate_poses
+                
+                # Add the travel distance to move the arm to the Viewpoint
+                if candidate_poses is not None and len(candidate_poses) > 0:
+                    viewpoint_xyz = candidate_poses[0][:3]
+                    dist = torch.linalg.norm(torch.tensor(current_ee_xyz) - torch.tensor(viewpoint_xyz)).item()
+                    effort_distance += dist
+                    current_ee_xyz = viewpoint_xyz
+
+        # Total Cost Calculation
+        action_penalty = len(skeleton) * longer_plan_penalty if penalize_longer_plans else 0
+        total_effort_cost = (effort_distance * WEIGHT_EFFORT) + action_penalty
+        total_vis_cost = (optimistic_NBV_cost * WEIGHT_VISIBILITY)
+        
+        total_task_cost = total_effort_cost + total_vis_cost
+
+        print(f"[Task Eval] Skeleton {idx+1} | Length: {len(skeleton)} | Effort: {total_effort_cost:.2f} | Vis: {total_vis_cost:.2f} | Total: {total_task_cost:.2f}")
         
         scored_skeletons.append({
             "skeleton": skeleton,
             "cost": total_task_cost,
-            "plan_str": plan_str
+            "plan_str": plan_str,
+            "candidate_poses": candidate_poses
         })
 
-    # Sort from lowest cost to highest cost
+    # Sort from lowest combined cost to highest
     scored_skeletons.sort(key=lambda x: x["cost"])
 
-    print("="*50)
+    print("="*60)
     print(f"Successfully ranked {len(scored_skeletons)} plans.")
-    print("="*50 + "\n")
+    print("="*60 + "\n")
 
     for rank, item in enumerate(scored_skeletons):
         print(f"\n[Generator] Yielding Rank {rank+1} Plan (Task Cost: {item['cost']:.2f})")
         print(f"Sequence: {item['plan_str']}")
         
-        yield item["skeleton"], master_candidate_poses
+        yield item["cost"], item["skeleton"], item["candidate_poses"]
 
 
 def sample_plan_skeleton(
@@ -439,7 +487,7 @@ def run_cutamp(
     # Select Best skeleton based on Optimistic NBV simulation
     with timer.time("optimistic_evaluation"):
         optimistic_plan_gen= yield_optimistic_skeletons(
-            top_k_skeletons, global_belief, scene_config, scene_mapping, penalize_longer_plans=True
+            top_k_skeletons, global_belief, scene_config, scene_mapping, world, penalize_longer_plans=False
         )
 
     # Heuristic Evaluation
@@ -451,7 +499,7 @@ def run_cutamp(
         plan_count = 0
         for idx in range(config.num_initial_plans):
             try:
-                plan_gen, candidate_poses_list = next(optimistic_plan_gen)
+                custom_task_cost, plan_gen, candidate_poses_list = next(optimistic_plan_gen)
                 plan_info, has_solution = sample_plan_skeleton(
                     plan_gen, candidate_poses_list, world, config, timer, idx, constraint_checker, cost_reducer, particle_initializer
                 )
@@ -459,6 +507,7 @@ def run_cutamp(
                     _log.debug("failed subgraph, skipping...")
                     num_skipped_plans += 1
                     continue
+                plan_info["custom_task_cost"] = custom_task_cost
             except StopIteration:
                 _log.info("Ran out of plans to sample")
                 break
@@ -471,7 +520,7 @@ def run_cutamp(
     # Sort plans by heuristic
     def sort_plans():
         with timer.time("sort_plans"):
-            plan_queue.sort(key=lambda x: x["heuristic"])
+            plan_queue.sort(key=lambda x: (x["custom_task_cost"], x["heuristic"]))
 
     sort_plans()
     
