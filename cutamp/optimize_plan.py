@@ -140,6 +140,21 @@ class ParticleOptimizer:
 
             rollout = rollout_fn(particles)
             cost_dict = cost_fn(rollout)
+
+            # --- NaN PROBE ---
+            for con_type, con_dict in cost_dict.items():
+                if isinstance(con_dict, dict):
+                    for name, item in con_dict.items():
+                        # Only check if it's actually a PyTorch tensor
+                        if isinstance(item, torch.Tensor) and item.numel() > 0:
+                            if torch.isnan(item).any():
+                                print(f"\n[DEBUG] 🚨 NaN detected in: {con_type} -> {name}")
+                # Sometimes the top level is a tensor itself
+                elif isinstance(con_dict, torch.Tensor) and con_dict.numel() > 0:
+                    if torch.isnan(con_dict).any():
+                        print(f"\n[DEBUG] 🚨 NaN detected in: {con_type}")
+            # -----------------
+
             costs = self.cost_reducer(cost_dict, consider_types=consider_types)
             satisfying_mask = self.get_satisfying_mask(cost_dict, verbose=False)
             num_satisfying = satisfying_mask.sum().item()
@@ -190,6 +205,18 @@ class ParticleOptimizer:
 
             # Compute gradients and step the optimizer
             loss.backward()
+
+            # --- ULTIMATE NaN PROBE ---
+            # 1. Check if the aggregated loss itself exploded
+            if torch.isnan(loss):
+                print(f"\n[DEBUG] 🚨 LOSS is NaN at step {step}!", flush=True)
+
+            # 2. Check the gradients before the optimizer corrupts the particles
+            for param_name, param_tensor in particles.items():
+                if param_tensor.grad is not None and torch.isnan(param_tensor.grad).any():
+                    print(f"\n[DEBUG] 🚨 GRADIENT NaN in variable '{param_name}' at step {step}!", flush=True)
+            # --------------------------
+
             optimizer.step()
             timer.stop("optimization_step")
             pbar.set_description(
@@ -200,6 +227,31 @@ class ParticleOptimizer:
         with torch.no_grad():
             rollout = rollout_fn(particles)
             cost_dict = cost_fn(rollout)
+
+            # ==================================================
+            # --- CONSTRAINT VIOLATION PROBE ---
+            # ==================================================
+            print("\n" + "="*60)
+            print("🔬 [DEBUG] CONSTRAINT VIOLATION BREAKDOWN")
+            print("="*60)
+            for con_type, con_dict in cost_dict.items():
+                if isinstance(con_dict, dict):
+                    for name, tensor in con_dict.items():
+                        if isinstance(tensor, torch.Tensor) and tensor.numel() > 0:
+                            tensor_flat = tensor.view(self.config.num_particles, -1)
+                            violating_particles = (tensor_flat > 1e-4).any(dim=1).sum().item()
+                            if violating_particles > 0:
+                                avg_cost = tensor[tensor > 1e-4].mean().item()
+                                print(f"❌ {con_type} -> {name}: {violating_particles}/{self.config.num_particles} particles failing (Avg Cost: {avg_cost:.4f})")
+                elif isinstance(con_dict, torch.Tensor) and con_dict.numel() > 0:
+                    tensor_flat = con_dict.view(self.config.num_particles, -1)
+                    violating_particles = (tensor_flat > 1e-4).any(dim=1).sum().item()
+                    if violating_particles > 0:
+                        avg_cost = con_dict[con_dict > 1e-4].mean().item()
+                        print(f"❌ {con_type}: {violating_particles}/{self.config.num_particles} particles failing (Avg Cost: {avg_cost:.4f})")
+            print("="*60 + "\n")
+            # ==================================================
+
             costs = self.cost_reducer(cost_dict, consider_types=consider_types)
             soft_costs = self.cost_reducer.soft_costs(cost_dict)
             hard_costs = self.cost_reducer.hard_costs(cost_dict)

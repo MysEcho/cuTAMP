@@ -194,6 +194,13 @@ def yield_optimistic_skeletons(
                     effort_distance += dist
                     current_ee_xyz = viewpoint_xyz
 
+            elif "Place" in op_base_name:
+                surface_name = op.values[3] # Place(obj, grasp, pose, surface, q)
+                
+                # Heavily penalize placing objects back into the cluttered workspace
+                if surface_name == "table":
+                    effort_distance += 500.0 
+
         # Total Cost Calculation
         action_penalty = len(skeleton) * longer_plan_penalty if penalize_longer_plans else 0
         total_effort_cost = (effort_distance * WEIGHT_EFFORT) + action_penalty
@@ -260,10 +267,10 @@ def sample_plan_skeleton(
         return None, False
     
     # Dynamic NBV Candidate Viewpoints Injection
-    if candidate_poses_list is not None:
+    if candidate_poses_list is not None and len(candidate_poses_list) > 0:
         for op in plan_skeleton:
             if op.name.startswith("Detect"):
-                _log.info("Distributing N candidate viewpoints across particles")
+                _log.info(f"Distributing candidate viewpoints for {op.name}")
                 
                 params_str = op.name.split("(")[1].replace(")", "")
                 parsed_params = [p.strip() for p in params_str.split(",")]
@@ -274,7 +281,7 @@ def sample_plan_skeleton(
                 candidate_tensor = torch.tensor(candidate_poses_list, dtype=torch.float32, device=world.device)
                 num_candidates = candidate_tensor.shape[0]
                 
-                # Distribute the N poses evenly across the 1024 particles
+                # Distribute the N poses evenly
                 repeats = config.num_particles // num_candidates
                 remainder = config.num_particles % num_candidates
                 
@@ -295,11 +302,31 @@ def sample_plan_skeleton(
                 world_from_ee = world_from_detect @ world.tool_from_ee
                 ik_result = world.ik_solver.solve_batch(Pose.from_matrix(world_from_ee), seed_config=None)
                 
+                q_sols = ik_result.solution[:, 0].clone()
+                nan_mask = torch.isnan(q_sols).any(dim=1)
+                # Replace any failed IK NaNs with the safe robot home position
+                q_sols[nan_mask] = world.q_init
+                
                 # Overwrite the joint configuration memory
-                plan_particles[q_var_name] = ik_result.solution[:, 0]
+                plan_particles[q_var_name] = q_sols
                 
                 _log.info(f"Detect IK Success: {ik_result.success.sum().item()}/{config.num_particles}")
-                break
+                # Removed the 'break' so it applies to ALL Detect actions in the skeleton!
+
+    # Fix all unnormalized Quaternions 
+    for param_name, tensor in plan_particles.items():
+        if tensor.shape[-1] == 7: # If it is a Pose tensor [X, Y, Z, W, X, Y, Z]
+            quats = tensor[..., 3:7]
+            norms = torch.linalg.norm(quats, dim=-1, keepdim=True)
+            
+            # Find any quaternions with a magnitude of 0.0
+            zero_mask = (norms == 0.0).squeeze(-1)
+            
+            # Force them to be a perfect Identity quaternion [1, 0, 0, 0]
+            if zero_mask.any():
+                tensor[zero_mask, 3] = 1.0 # Set W to 1.0
+                tensor[zero_mask, 4:7] = 0.0 # Set X, Y, Z to 0.0
+                print(f"[Sanitizer] Fixed {zero_mask.sum().item()} unnormalized quaternions in '{param_name}'")
 
     # Rollout particles and compute costs
     rollout_fn = RolloutFunction(plan_skeleton, world, config)
@@ -517,6 +544,8 @@ def run_cutamp(
         for idx in range(config.num_initial_plans):
             try:
                 custom_task_cost, plan_gen, candidate_poses_list = next(optimistic_plan_gen)
+
+                
                 plan_info, has_solution = sample_plan_skeleton(
                     plan_gen, candidate_poses_list, world, config, timer, idx, constraint_checker, cost_reducer, particle_initializer
                 )
@@ -568,6 +597,7 @@ def run_cutamp(
     }
     
     curobo_plan = None
+    winning_pose = None
     found_solution = False
     particle_optimizer = ParticleOptimizer(config, cost_reducer, constraint_checker)
     
