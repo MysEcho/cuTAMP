@@ -141,6 +141,29 @@ class ParticleOptimizer:
             rollout = rollout_fn(particles)
             cost_dict = cost_fn(rollout)
 
+            # ==================================================
+            # --- RAW MATH DEBUG: EXACT COSTS AT STEP 0 ---
+            # ==================================================
+            if step == 0:
+                print("\n" + "="*80)
+                print("🔬 [RAW MATH DEBUG] EXACT CONSTRAINT ERRORS AT STEP 0")
+                print("="*80)
+                for c_type, c_vals in cost_dict.items():
+                    if isinstance(c_vals, dict):
+                        for c_name, c_tensor in c_vals.items():
+                            if isinstance(c_tensor, torch.Tensor) and c_tensor.numel() > 0:
+                                max_err = c_tensor.max().item()
+                                min_err = c_tensor.min().item()
+                                mean_err = c_tensor.mean().item()
+                                print(f"{c_type: <25} -> {c_name: <25} | Min: {min_err:>8.4f} | Max: {max_err:>8.4f} | Mean: {mean_err:>8.4f}")
+                    elif isinstance(c_vals, torch.Tensor) and c_vals.numel() > 0:
+                        max_err = c_vals.max().item()
+                        min_err = c_vals.min().item()
+                        mean_err = c_vals.mean().item()
+                        print(f"{c_type: <25} {'': <28}| Min: {min_err:>8.4f} | Max: {max_err:>8.4f} | Mean: {mean_err:>8.4f}")
+                print("="*80 + "\n")
+            # ==================================================
+
             # --- NaN PROBE ---
             for con_type, con_dict in cost_dict.items():
                 if isinstance(con_dict, dict):
@@ -227,6 +250,8 @@ class ParticleOptimizer:
         with torch.no_grad():
             rollout = rollout_fn(particles)
             cost_dict = cost_fn(rollout)
+
+            
 
             # ==================================================
             # --- CONSTRAINT VIOLATION PROBE ---
