@@ -158,6 +158,7 @@ def yield_optimistic_skeletons(
         for op in skeleton:
             
             op_base_name = op.operator.name if hasattr(op, 'operator') else op.name
+            candidate_poses_dict = {}
             
             if "Pick" in op_base_name:
                 target_obj = op.values[0]
@@ -185,7 +186,8 @@ def yield_optimistic_skeletons(
                     verbose=verbose,
                 )
                 optimistic_NBV_cost = vis_cost
-                candidate_poses = master_candidate_poses
+                pose_var_name = op.values[1]
+                candidate_poses_dict[pose_var_name] = master_candidate_poses
                 
                 # Add the travel distance to move the arm to the Viewpoint
                 if candidate_poses is not None and len(candidate_poses) > 0:

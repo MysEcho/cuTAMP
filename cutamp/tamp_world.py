@@ -209,18 +209,64 @@ class TAMPWorld:
         return motion_gen
 
 
+# def check_tamp_world_not_in_collision(world: TAMPWorld, collision_tol: float = 1e-6):
+#     """Check that the initial state of the movable objects are not in collision."""
+#     for obj in world.movables:
+#         # Transform spheres to world frame
+#         mat4x4 = pose_list_to_mat4x4(obj.pose).to(world.device)
+#         spheres = transform_spheres(world.get_collision_spheres(obj), mat4x4)  # [n, 4]
+#         spheres = spheres[None, None].contiguous()  # [1, 1, n, 4]
+
+#         coll_cost = world.collision_fn(spheres).sum()
+#         if coll_cost > collision_tol:
+#             print(f"WARNING: Initial state in collision for '{obj.name}' with cost {coll_cost}")
+#             # Un-comment this for strict collision check in cuTAMP. Currently allows with Warnings.
+#             # raise ValueError(f"Initial state in collision for object '{obj.name}' with cost {coll_cost}")
+
+#     # TODO: catch collisions between spheres for each movable objects here
+
+
 def check_tamp_world_not_in_collision(world: TAMPWorld, collision_tol: float = 1e-6):
     """Check that the initial state of the movable objects are not in collision."""
+    
+    # 1. Check collisions with static environment (Table, etc.)
     for obj in world.movables:
-        # Transform spheres to world frame
         mat4x4 = pose_list_to_mat4x4(obj.pose).to(world.device)
-        spheres = transform_spheres(world.get_collision_spheres(obj), mat4x4)  # [n, 4]
-        spheres = spheres[None, None].contiguous()  # [1, 1, n, 4]
+        spheres = transform_spheres(world.get_collision_spheres(obj), mat4x4)
+        spheres = spheres[None, None].contiguous()
 
         coll_cost = world.collision_fn(spheres).sum()
         if coll_cost > collision_tol:
-            print(f"WARNING: Initial state in collision for '{obj.name}' with cost {coll_cost}")
-            # Un-comment this for strict collision check in cuTAMP. Currently allows with Warnings.
-            # raise ValueError(f"Initial state in collision for object '{obj.name}' with cost {coll_cost}")
+            print(f"WARNING: Initial state in collision for '{obj.name}' with environment (cost {coll_cost})")
 
-    # TODO: catch collisions between spheres for each movable objects here
+    # 2. IMPLEMENTED TODO: Check collisions BETWEEN movable objects
+    movables = world.movables
+    n_movables = len(movables)
+    
+    for i in range(n_movables):
+        obj_i = movables[i]
+        mat_i = pose_list_to_mat4x4(obj_i.pose).to(world.device)
+        # Spheres_i shape: [N, 4] where [:, :3] is center and [:, 3] is radius
+        spheres_i = transform_spheres(world.get_collision_spheres(obj_i), mat_i)
+
+        for j in range(i + 1, n_movables):
+            obj_j = movables[j]
+            mat_j = pose_list_to_mat4x4(obj_j.pose).to(world.device)
+            spheres_j = transform_spheres(world.get_collision_spheres(obj_j), mat_j)
+
+            # --- Pairwise Distance Logic ---
+            # spheres_i: [N, 4], spheres_j: [M, 4]
+            # Use broadcasting to get all pairwise distances: [N, M, 3]
+            diff = spheres_i[:, None, :3] - spheres_j[None, :, :3]
+            dist = torch.linalg.norm(diff, dim=-1) # [N, M]
+            
+            # Combined radii: [N, M]
+            sum_radii = spheres_i[:, None, 3] + spheres_j[None, :, 3]
+            
+            # Collision if distance < sum_radii
+            # We calculate cost as the amount of penetration
+            penetration = torch.clamp(sum_radii - dist, min=0.0)
+            pair_coll_cost = penetration.sum()
+
+            if pair_coll_cost > collision_tol:
+                print(f"WARNING: Initial state collision between '{obj_i.name}' and '{obj_j.name}' with cost {pair_coll_cost}")
