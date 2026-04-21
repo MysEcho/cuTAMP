@@ -545,6 +545,29 @@ def run_cutamp(
             try:
                 custom_task_cost, plan_gen, candidate_poses_list = next(optimistic_plan_gen)
 
+                # ==================================================
+                # --- MANUAL SKELETON TOGGLE FOR DEBUGGING ---
+                # ==================================================
+                TEST_PICK_ONLY = True  # <--- Change to False to test Pick & Place
+                
+                truncated_skeleton = []
+                for op in plan_gen:
+                    truncated_skeleton.append(op)
+                    op_name = op.operator.name if hasattr(op, 'operator') else op.name
+                    
+                    if TEST_PICK_ONLY and "Pick" in op_name:
+                        break # Stop immediately after the Pick!
+                    elif not TEST_PICK_ONLY and "Place" in op_name:
+                        break # Stop immediately after the first Place!
+                
+                plan_gen = truncated_skeleton 
+                
+                print("\n" + "="*60)
+                mode = "PICK ONLY" if TEST_PICK_ONLY else "PICK AND PLACE"
+                print(f"🔬 [DEBUG] EXECUTING ISOLATED SKELETON ({mode} - Length: {len(plan_gen)}):")
+                print(" -> ".join([op.name for op in plan_gen]))
+                print("="*60 + "\n")
+                # ==================================================
                 
                 plan_info, has_solution = sample_plan_skeleton(
                     plan_gen, candidate_poses_list, world, config, timer, idx, constraint_checker, cost_reducer, particle_initializer
