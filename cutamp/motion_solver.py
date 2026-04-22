@@ -64,15 +64,13 @@ def solve_curobo(
     last_js = JointState.from_position(best_particle["q0"][None].clone())
     last_q_name = "q0"
 
-    # Fixed approach offset. This could be something we eventually optimize too
-    approach_offset = torch.eye(4, device=world.device)
-    approach_offset[2, 3] = -0.05
+    # Top-Down Hover Distance (20cm directly above objects in World Space)
+    hover_z_distance = 0.20 
 
-    # Accumulated plans we return that the real robot can actually execute
+    # Accumulated plans that the real robot can actually execute
     last_op_type = None
     accum_plans = []
 
-    # Iterate through skeleton and motion plan
     for idx, ground_op in enumerate(plan_skeleton):
         op_name = ground_op.operator.name
 
@@ -82,20 +80,12 @@ def solve_curobo(
                     return True
             return False
 
-        # MoveFree, defer motion planning to pick to use object pose instead of planning from q_start to q_end.
-        # This works more reliably and gives higher quality motions.
-        # if op_name == MoveFree.name:
-        #     q_start, traj, q_end = ground_op.values
-        #     if traj in best_particle:
-        #         raise NotImplementedError("Trajectories not supported yet")
-        #     last_q_name = q_start
-        #     pass
-
+        # MoveFree
         if op_name == MoveFree.name:
             q_start, traj, q_end = ground_op.values
             if q_end in best_particle:
 
-
+                # DELEGATION: If moving to a grasp, let Pick handle it for safe approach
                 if is_target_of_pick_or_place(q_end):
                     last_q_name = q_start
                     print(f"[{op_name}] Deferring global motion to target {q_end} to the Pick/Place block.")
@@ -106,14 +96,11 @@ def solve_curobo(
                     target_q = best_particle[q_end].clone()
                     target_js = JointState.from_position(target_q[None])
 
-                    # ==========================================================
-                    # --- GRASP VERIFICATION PROBE ---
-                    # ==========================================================
+                    # GRASP VERIFICATION PROBE 
                     print(f"\n[GRASP PROBE] Analyzing Target State for MoveFree to {q_end}")
                     try:
                         fk_result = motion_gen.kinematics.compute_kinematics(target_js)
                         
-                        # Handle different cuRobo version APIs
                         if hasattr(fk_result, 'ee_position'):
                             ee_pos = fk_result.ee_position[0].cpu().numpy()
                             ee_quat = fk_result.ee_quaternion[0].cpu().numpy()
@@ -121,17 +108,15 @@ def solve_curobo(
                             ee_pos = fk_result.ee_pose.position[0].cpu().numpy()
                             ee_quat = fk_result.ee_pose.quaternion[0].cpu().numpy()
                         else:
-                            print(f" ⚠️ Attributes available: {dir(fk_result)}")
                             raise AttributeError("Could not find position attribute.")
                         
                         print(f" -> EE Target XYZ : [{ee_pos[0]:.4f}, {ee_pos[1]:.4f}, {ee_pos[2]:.4f}]")
                         print(f" -> EE Target Quat: [{ee_quat[0]:.4f}, {ee_quat[1]:.4f}, {ee_quat[2]:.4f}, {ee_quat[3]:.4f}]")
                         
                         if ee_pos[2] < 0.43: 
-                            print(f" ⚠️ DANGER: End Effector (Z={ee_pos[2]:.4f}) is colliding with or below the table surface (Z=0.425)!")
+                            print(f" DANGER: End Effector (Z={ee_pos[2]:.4f}) is colliding with or below the table surface (Z=0.425)!")
                     except Exception as e:
-                        print(f" ⚠️ Could not compute FK for probe: {e}")
-                    # ==========================================================
+                        print(f" Could not compute FK for probe: {e}")
 
                     result = motion_gen.plan_single_js(start_js, target_js, plan_config)
                     
@@ -150,19 +135,14 @@ def solve_curobo(
                 last_op_type = "MoveFree"
                 
             else:
-                # If q_end is unknown, it's a generic approach for a Pick/Place.
-                # Defer the motion planning to the Pick action.
                 last_q_name = q_start
-
-            pass
 
         # MoveHolding
         elif op_name == MoveHolding.name:
-            # FIX: MoveHolding expects 5 values, not 3!
             obj, grasp, q_start, traj, q_end = ground_op.values
             if q_end in best_particle:
                 
-                # FIX 1: Defer the global motion to the Pick/Place block
+                # DELEGATION: If moving to place, let Place handle it for a safe top-down approach
                 if is_target_of_pick_or_place(q_end):
                     last_q_name = q_start
                     print(f"[{op_name}] Deferring global motion to target {q_end} to the Pick/Place block.")
@@ -174,25 +154,18 @@ def solve_curobo(
                     target_js = JointState.from_position(target_q[None])
                     
                     result = motion_gen.plan_single_js(start_js, target_js, plan_config)
-                    
                     if not result.success:
-                        _log.error(f"Failed to plan MoveHolding to {q_end}. Status: {result.status}")
                         raise RuntimeError(f"Failed to plan motion for {ground_op.name}")
 
                 dt = result.interpolation_dt
                 plan = result.get_interpolated_plan()
                 accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
-                
                 last_js = JointState.from_position(plan[-1:].position)
                 ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
-                
                 last_q_name = q_end
                 last_op_type = "MoveHolding"
-                
             else:
                 last_q_name = q_start
-
-            pass
 
         # Pick
         elif op_name == Pick.name:
@@ -205,49 +178,38 @@ def solve_curobo(
                 target_q = best_particle[q].clone()
                 target_js = JointState.from_position(target_q[None])
 
-                # Get Cartesian EE pose from the PyTorch joints to calculate the approach
+                # Calculate strictly top-down approach pose (20cm above the PyTorch optimized grasp)
                 world_from_ee = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
-                world_from_approach = world_from_ee @ approach_offset
+                world_from_hover = world_from_ee.clone()
+                world_from_hover[2, 3] += hover_z_distance
 
-                # Get the retract pose and plan to it if it's not q0
-                # A. Plan Retract (if we aren't at q0)
+                # Plan Local Retract (Only if backing out of a camera/Detect pose)
                 if last_q_name != "q0" and last_op_type != "Detect":
                     world_from_ee_start = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
-                    world_from_retract = world_from_ee_start @ approach_offset
-                    retract_result = motion_gen.plan_single(start_js, Pose.from_matrix(world_from_retract), plan_config)
+                    world_from_start_retract = world_from_ee_start.clone()
+                    world_from_start_retract[2, 3] += hover_z_distance
+                    retract_result = motion_gen.plan_single(start_js, Pose.from_matrix(world_from_start_retract), plan_config)
                     if not retract_result.success:
                         raise RuntimeError(f"Failed to plan retract for {ground_op.name}. Status: {retract_result.status}")
                     retract_js = JointState.from_position(retract_result.get_interpolated_plan().position[-1:])
                 else:
                     retract_result = None
                     retract_js = start_js
-                
-                motion_gen.world_coll_checker.enable_obstacle(enable=False, name=obj)
 
-                # B. Plan Global Approach (from current retracted state to the hover pose)
-                approach_result = motion_gen.plan_single(retract_js, Pose.from_matrix(world_from_approach), plan_config)
+                # Plan Global Transit (across the workspace to hover exactly above the object)
+                approach_result = motion_gen.plan_single(retract_js, Pose.from_matrix(world_from_hover), plan_config)
                 if not approach_result.success:
                     raise RuntimeError(f"Failed to plan approach for {ground_op.name}. Status: {approach_result.status}")
-
-                # C. Plan Final Insertion (from hover pose into PyTorch's exact joint configuration)
+                
+                # Plan Final Descent (Straight down into the PyTorch grasp)
                 approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
+                motion_gen.world_coll_checker.enable_obstacle(enable=False, name=obj) 
+                
                 end_result = motion_gen.plan_single_js(approach_js, target_js, plan_config)
                 if not end_result.success:
-                    raise RuntimeError(f"Failed to plan final grasp insertion for {ground_op.name}. Status: {end_result.status}")
-
-                # Plan to from approach to end js
-                approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
-                end_result = motion_gen.plan_single(approach_js, Pose.from_matrix(world_from_ee), plan_config)
-                if not end_result.success:
-                    # _log.error(
-                    #     "Start state:",
-                    #     motion_gen.check_start_state(approach_js),
-                    #     motion_gen.check_constraints(approach_js),
-                    # )
+                    motion_gen.world_coll_checker.enable_obstacle(enable=True, name=obj)
                     _log.error(f"Start state: {motion_gen.check_start_state(approach_js)}, {motion_gen.check_constraints(approach_js)}")
-                    _log.error(f"cuRobo result status: {end_result.status}")
-                    visualizer.set_joint_positions(approach_js.position[0])
-                    raise RuntimeError(f"Failed to plan from approach to end for {ground_op.name}")
+                    raise RuntimeError(f"Failed to plan from approach to end for {ground_op.name}. Status: {end_result.status}")
 
             for result in [retract_result, approach_result, end_result]:
                 if result is None:
@@ -266,27 +228,17 @@ def solve_curobo(
                 spheres = world.get_collision_spheres(obj)
                 pts = spheres[:, :3].cpu().numpy()
                 n_radius = spheres[:, 3].cpu().numpy()
-
                 obj_pose = Pose.from_list(self.pose, self.tensor_args)
                 pre_transform_pose = kwargs["pre_transform_pose"]
                 if pre_transform_pose is not None:
-                    obj_pose = pre_transform_pose.multiply(obj_pose)  # convert object pose to another frame
-
-                if pts is None or len(pts) == 0:
-                    raise ValueError("No points found from the spheres")
-
+                    obj_pose = pre_transform_pose.multiply(obj_pose)
                 points_cuda = self.tensor_args.to_device(pts)
                 pts = obj_pose.transform_points(points_cuda).cpu().view(-1, 3).numpy()
 
-                new_spheres = [
-                    Sphere(
-                        name=f"{self.name}_sph_{i}",
-                        pose=[pts[i, 0], pts[i, 1], pts[i, 2], 1, 0, 0, 0],
-                        radius=n_radius[i],
-                    )
+                return [
+                    Sphere(name=f"{self.name}_sph_{i}", pose=[pts[i, 0], pts[i, 1], pts[i, 2], 1, 0, 0, 0], radius=n_radius[i])
                     for i in range(pts.shape[0])
                 ]
-                return new_spheres
 
             obstacle.get_bounding_spheres = get_bounding_spheres.__get__(obstacle)
 
@@ -303,21 +255,27 @@ def solve_curobo(
             obstacle.get_bounding_spheres = obstacle.old_get_bounding_spheres
             del obstacle.old_get_bounding_spheres
 
-            # Close the gripper in the visualization
+            # Close the gripper
             if config.robot == "ur5":
-                end_val = 0.4
-                interp = torch.linspace(0.0, end_val, 20)
-                interp = interp[:, None]
+                interp = torch.linspace(0.0, 0.4, 20)[:, None]
             else:
-                end_val = 0.02
-                interp = torch.linspace(0.04, end_val, 20)[:, None]
-                interp = interp.repeat(1, 2)
-            dt = 0.02
+                interp = torch.linspace(0.04, 0.02, 20)[:, None].repeat(1, 2)
+            
             accum_plans.append({"type": "gripper", "action": "close"})
+            all_pos = torch.cat([last_js.position.expand(interp.shape[0], -1).cpu(), interp], dim=1)
+            ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=0.02)
 
-            all_pos = last_js.position.expand(interp.shape[0], -1).cpu()
-            all_pos = torch.cat([all_pos, interp], dim=1)
-            ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=dt)
+            # Plan Lift / Retract (Pull object 20cm straight up out of the clutter)
+            lift_result = motion_gen.plan_single(last_js, Pose.from_matrix(world_from_hover), plan_config)
+            if not lift_result.success:
+                raise RuntimeError(f"Failed to plan lift after grasping {ground_op.name}. Status: {lift_result.status}")
+            
+            dt = lift_result.interpolation_dt
+            plan = lift_result.get_interpolated_plan()
+            accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
+            last_js = JointState.from_position(plan[-1:].position)
+            ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+            last_op_type = "Pick"
 
         # Place
         elif op_name == Place.name:
@@ -325,49 +283,44 @@ def solve_curobo(
             assert last_js is not None
 
             with timer.time("curobo_planning"):
-                start_js = last_js
+                start_js = last_js # The robot is currently hovering safely above the pick site
                 
-                # FIX 3: Use PyTorch's EXACT optimized joint state for the placement
+                # Use PyTorch's exact optimized joint state for the placement
                 target_q = best_particle[q].clone()
                 target_js = JointState.from_position(target_q[None])
 
-                # Get Cartesian EE poses
+                # Calculate strictly top-down hover pose over the discard zone
                 world_from_ee = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
                 world_from_ee_start = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
-                world_from_approach = world_from_ee @ approach_offset
+                
+                world_from_hover = world_from_ee.clone()
+                world_from_hover[2, 3] += hover_z_distance
 
-                # A. Plan Retract (pulling object up from pick site)
-                world_from_retract = world_from_ee_start @ approach_offset
-                retract_result = motion_gen.plan_single(start_js, Pose.from_matrix(world_from_retract), plan_config)
-                if not retract_result.success:
-                    raise RuntimeError(f"Failed to plan retract for {ground_op.name}. Status: {retract_result.status}")
-
-                # B. Plan Global Approach (navigating across table to hover over place site)
-                retract_js = JointState.from_position(retract_result.get_interpolated_plan().position[-1:])
-                approach_result = motion_gen.plan_single(retract_js, Pose.from_matrix(world_from_approach), plan_config)
+                # Plan safe crossing above the table to the discard zone
+                approach_result = motion_gen.plan_single(start_js, Pose.from_matrix(world_from_hover), plan_config)
                 if not approach_result.success:
                     raise RuntimeError(f"Failed to plan approach for {ground_op.name}. Status: {approach_result.status}")
 
-                # C. Plan Final Placement (lowering directly into PyTorch's exact joint configuration)
+                # Plan Final Descent (Straight down into the PyTorch placement)
                 approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
                 end_result = motion_gen.plan_single_js(approach_js, target_js, plan_config)
                 if not end_result.success:
                     raise RuntimeError(f"Failed to plan final placement insertion for {ground_op.name}. Status: {end_result.status}")
 
-            # Compute the offset between the object and end-effector at start of plan
+            # Compute the offset between the object and end-effector while grasped
             obj_from_ee = torch.inverse(obj_to_current_pose[obj]) @ world_from_ee_start
             ee_from_obj = torch.inverse(obj_from_ee)
 
-            for result in [retract_result, approach_result, end_result]:
+            for result in [approach_result, end_result]:
                 dt = result.interpolation_dt
                 plan = result.get_interpolated_plan()
                 accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
                 last_js = JointState.from_position(plan[-1:].position)
 
-                # Forward kinematics to get end-effector pose
+                # Forward kinematics to update object position during transit
                 robot_state = world.kin_model.get_state(plan.position)
-                world_from_ee = robot_state.ee_pose.get_matrix()
-                world_from_obj = world_from_ee @ ee_from_obj
+                world_from_ee_traj = robot_state.ee_pose.get_matrix()
+                world_from_obj = world_from_ee_traj @ ee_from_obj
                 ts = visualizer.log_joint_trajectory_with_mat4x4(
                     traj=plan.position,
                     mat4x4_key=f"world/{obj}",
@@ -376,11 +329,9 @@ def solve_curobo(
                     start_time=ts,
                     dt=dt,
                 )
-
-                # Updated pose is the last pose
                 obj_to_current_pose[obj] = world_from_obj[-1]
 
-            # Detach object from robot and enable it again
+            # Detach object from robot and enable collision again
             with timer.time("curobo_planning"):
                 motion_gen.detach_object_from_robot("attached_object")
                 motion_gen.world_coll_checker.enable_obstacle(enable=True, name=obj)
@@ -389,44 +340,40 @@ def solve_curobo(
                     obj, Pose.from_matrix(obj_pose), update_cpu_reference=True
                 )
 
-            # Open the gripper for visualization purposes
+            # Open the gripper
             if config.robot == "ur5":
-                end_val = 0.0
-                interp = torch.linspace(0.4, end_val, 20)
-                interp = interp[:, None]
+                interp = torch.linspace(0.4, 0.0, 20)[:, None]
             else:
-                end_val = 0.04
-                interp = torch.linspace(0.02, end_val, 20)[:, None]
-                interp = interp.repeat(1, 2)
-            dt = 0.02
+                interp = torch.linspace(0.02, 0.04, 20)[:, None].repeat(1, 2)
+            
             accum_plans.append({"type": "gripper", "action": "open"})
+            all_pos = torch.cat([last_js.position.expand(interp.shape[0], -1).cpu(), interp], dim=1)
+            ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=0.02)
 
-            all_pos = last_js.position.expand(interp.shape[0], -1).cpu()
-            all_pos = torch.cat([all_pos, interp], dim=1)
-            ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=dt)
+            # Plan Lift / Retract (Pull empty gripper 20cm straight up from discard)
+            lift_result = motion_gen.plan_single(last_js, Pose.from_matrix(world_from_hover), plan_config)
+            if not lift_result.success:
+                raise RuntimeError(f"Failed to plan lift after placing {ground_op.name}. Status: {lift_result.status}")
+            
+            dt = lift_result.interpolation_dt
+            plan = lift_result.get_interpolated_plan()
+            accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
+            last_js = JointState.from_position(plan[-1:].position)
+            ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+            last_op_type = "Place"
 
-        # Push and PushStick
         elif op_name == Push.name or op_name == PushStick.name:
-            # TODO: implement motion solving for these operators
             raise NotImplementedError("Push and PushStick operations are not yet supported in cuRobo motion planning.")
         
-        # Detect
         elif op_name == "Detect":
             obj, pose_name, q_name = ground_op.values
             assert last_js is not None
-
-            # TODO: Add camera callback
-            
             winning_pose = best_particle[pose_name].cpu().numpy()
             
             print("\n" + "="*40)
             print(f"Executing Detect -> Camera shutter triggered at (xyz): {winning_pose[:3]}")
             print("="*40 + "\n")
-
             last_op_type = "Detect"
-
-
-        # Unsupported
         else:
             raise NotImplementedError(f"Unsupported operator {op_name}")
 
@@ -434,36 +381,35 @@ def solve_curobo(
 
     start_js = last_js
 
-    # Plan to retract
+    # Plan to go home at the end
     world_from_ee = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
-    world_from_retract = world_from_ee @ approach_offset
+    world_from_retract = world_from_ee.clone()
+    world_from_retract[2, 3] += hover_z_distance
+    
     retract_result = motion_gen.plan_single(start_js, Pose.from_matrix(world_from_retract), plan_config)
-    if not retract_result.success:
-        raise RuntimeError(f"Failed to plan for retract. Status: {retract_result.status}")
-    dt = retract_result.interpolation_dt
-    plan = retract_result.get_interpolated_plan()
-    accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
-    last_js = JointState.from_position(plan[-1:].position)
-    ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+    if retract_result.success:
+        dt = retract_result.interpolation_dt
+        plan = retract_result.get_interpolated_plan()
+        accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
+        last_js = JointState.from_position(plan[-1:].position)
+        ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
 
-    # Plan to go home at the end which we'll assume is q0
     q_last = last_js.position[0]
     q_home = best_particle["q0"].clone()
     js_last = JointState.from_position(q_last[None])
     js_home = JointState.from_position(q_home[None])
+    
     with timer.time("curobo_planning"):
         result = motion_gen.plan_single_js(js_last, js_home, plan_config)
     if not result.success:
-        # TODO: Going Home scheme
-        # raise RuntimeError("Failed to plan for going home")
         print("WARNING: Failed to plan for going home, but returning successful Pick plan!")
-        pass
 
-    dt = result.interpolation_dt
-    plan = result.get_interpolated_plan()
-    accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
-    _ = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
-    _log.debug("Planned to go home")
+    if result.success:
+        dt = result.interpolation_dt
+        plan = result.get_interpolated_plan()
+        accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
+        _ = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+        _log.debug("Planned to go home")
 
     _log.info(f"Motion planning metrics: {timer.get_summary('curobo_planning')}")
     return accum_plans, winning_pose
