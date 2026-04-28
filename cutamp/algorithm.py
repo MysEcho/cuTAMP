@@ -111,7 +111,7 @@ def yield_optimistic_skeletons(
     world: TAMPWorld,
     penalize_longer_plans: bool = False,
     verbose:bool = False,
-) -> Iterator[Tuple[Any, List]]:
+) -> Iterator[Tuple[Any, List, dict]]: 
     """
     Evaluates Top K skeletons using optimistic heuristic costs.
     Calculates Effort Cost + Optimistic Visibility Cost.
@@ -144,7 +144,8 @@ def yield_optimistic_skeletons(
         # Virtual State Trackers for this specific skeleton
         effort_distance = 0.0
         optimistic_NBV_cost = 0.0
-        candidate_poses = None
+        
+        candidate_poses_dict = {}
         
         # Hardcoded currently from interface
         current_ee_xyz = [0.0, 0.0, 0.9] 
@@ -158,7 +159,6 @@ def yield_optimistic_skeletons(
         for op in skeleton:
             
             op_base_name = op.operator.name if hasattr(op, 'operator') else op.name
-            candidate_poses_dict = {}
             
             if "Pick" in op_base_name:
                 target_obj = op.values[0]
@@ -173,25 +173,29 @@ def yield_optimistic_skeletons(
             # Compute visibility by running raycaster on the updated virtual scene
             elif "Detect" in op_base_name:
                 target = op.values[0]
+                pose_var_name = op.values[1]
                 
                 # Ignore everything that was moved, except the target itself
                 objects_to_ignore = list(objects_moved - {target})
                 
+                # Pass the target_obj_name explicitly
                 vis_cost, master_candidate_poses = cuTAMPUtilities.sample_NBV_for_cutamp(
                     global_belief=global_belief,
                     env_metadata=(scene_config, scene_mapping),
                     plan_skeleton=skeleton, 
                     plan_str=plan_str,
+                    target_obj_name=target, 
                     ignore_objects=objects_to_ignore,
                     verbose=verbose,
                 )
                 optimistic_NBV_cost = vis_cost
-                pose_var_name = op.values[1]
+                
+                # Store directly into the correctly scoped dictionary
                 candidate_poses_dict[pose_var_name] = master_candidate_poses
                 
-                # Add the travel distance to move the arm to the Viewpoint
-                if candidate_poses is not None and len(candidate_poses) > 0:
-                    viewpoint_xyz = candidate_poses[0][:3]
+                # Add the travel distance to move the arm to the Viewpoint (use master candidate poses)
+                if master_candidate_poses is not None and len(master_candidate_poses) > 0:
+                    viewpoint_xyz = master_candidate_poses[0][:3]
                     dist = torch.linalg.norm(torch.tensor(current_ee_xyz) - torch.tensor(viewpoint_xyz)).item()
                     effort_distance += dist
                     current_ee_xyz = viewpoint_xyz
@@ -224,7 +228,7 @@ def yield_optimistic_skeletons(
             "skeleton": skeleton,
             "cost": total_task_cost,
             "plan_str": plan_str,
-            "candidate_poses": candidate_poses
+            "candidate_poses_dict": candidate_poses_dict 
         })
 
     # Sort from lowest combined cost to highest
@@ -240,12 +244,12 @@ def yield_optimistic_skeletons(
             print(f"\n[Generator] Yielding Rank {rank+1} Plan (Task Cost: {item['cost']:.2f})")
             print(f"Sequence: {item['plan_str']}")
         
-        yield item["cost"], item["skeleton"], item["candidate_poses"]
+        yield item["cost"], item["skeleton"], item["candidate_poses_dict"]
 
 
 def sample_plan_skeleton(
     plan_skeleton,
-    candidate_poses_list:List,  
+    candidate_poses_dict:dict,  
     world: TAMPWorld,
     config: TAMPConfiguration,
     timer: TorchTimer,
@@ -269,51 +273,57 @@ def sample_plan_skeleton(
         return None, False
     
     # Dynamic NBV Candidate Viewpoints Injection
-    if candidate_poses_list is not None and len(candidate_poses_list) > 0:
+    if candidate_poses_dict:
         for op in plan_skeleton:
             if op.name.startswith("Detect"):
                 _log.info(f"Distributing candidate viewpoints for {op.name}")
                 
+                # Extract the variable names for this specific Detect action
                 params_str = op.name.split("(")[1].replace(")", "")
                 parsed_params = [p.strip() for p in params_str.split(",")]
                 pose_var_name = parsed_params[1] 
                 q_var_name = parsed_params[2]
                 
-                # list of N poses to a PyTorch tensor
-                candidate_tensor = torch.tensor(candidate_poses_list, dtype=torch.float32, device=world.device)
-                num_candidates = candidate_tensor.shape[0]
+                # Fetch the targeted hemisphere poses specifically for this detect action
+                specific_poses = candidate_poses_dict.get(pose_var_name)
                 
-                # Distribute the N poses evenly
-                repeats = config.num_particles // num_candidates
-                remainder = config.num_particles % num_candidates
-                
-                pose_tensor_batch = torch.cat([
-                    candidate_tensor.repeat_interleave(repeats, dim=0),
-                    candidate_tensor[:remainder]
-                ], dim=0)
-                
-                # Overwrite the Cartesian target memory
-                plan_particles[pose_var_name] = pose_tensor_batch
-                
-                # Solve IK for the batch to give the GPU starting seeds
-                world_from_detect = Pose(
-                    position=pose_tensor_batch[:, :3], 
-                    quaternion=pose_tensor_batch[:, 3:]
-                ).get_matrix()
-                
-                world_from_ee = world_from_detect @ world.tool_from_ee
-                ik_result = world.ik_solver.solve_batch(Pose.from_matrix(world_from_ee), seed_config=None)
-                
-                q_sols = ik_result.solution[:, 0].clone()
-                nan_mask = torch.isnan(q_sols).any(dim=1)
-                # Replace any failed IK NaNs with the safe robot home position
-                q_sols[nan_mask] = world.q_init
-                
-                # Overwrite the joint configuration memory
-                plan_particles[q_var_name] = q_sols
-                
-                _log.info(f"Detect IK Success: {ik_result.success.sum().item()}/{config.num_particles}")
-                # Removed the 'break' so it applies to ALL Detect actions in the skeleton!
+                if specific_poses is not None and len(specific_poses) > 0:
+                    # Convert list of N poses to a PyTorch tensor
+                    candidate_tensor = torch.tensor(specific_poses, dtype=torch.float32, device=world.device)
+                    num_candidates = candidate_tensor.shape[0]
+                    
+                    # Distribute the N poses evenly
+                    repeats = config.num_particles // num_candidates
+                    remainder = config.num_particles % num_candidates
+                    
+                    pose_tensor_batch = torch.cat([
+                        candidate_tensor.repeat_interleave(repeats, dim=0),
+                        candidate_tensor[:remainder]
+                    ], dim=0)
+                    
+                    # Overwrite the Cartesian target memory
+                    plan_particles[pose_var_name] = pose_tensor_batch
+                    
+                    # Solve IK for the batch to give the GPU starting seeds
+                    world_from_detect = Pose(
+                        position=pose_tensor_batch[:, :3], 
+                        quaternion=pose_tensor_batch[:, 3:]
+                    ).get_matrix()
+                    
+                    world_from_ee = world_from_detect @ world.tool_from_ee
+                    ik_result = world.ik_solver.solve_batch(Pose.from_matrix(world_from_ee), seed_config=None)
+                    
+                    q_sols = ik_result.solution[:, 0].clone()
+                    nan_mask = torch.isnan(q_sols).any(dim=1)
+                    # Replace any failed IK NaNs with the safe robot home position
+                    q_sols[nan_mask] = world.q_init
+                    
+                    # Overwrite the joint configuration memory
+                    plan_particles[q_var_name] = q_sols
+                    
+                    _log.info(f"Detect IK Success ({pose_var_name}): {ik_result.success.sum().item()}/{config.num_particles}")
+                else:
+                    _log.warning(f"No candidate poses found in dictionary for {pose_var_name}. Falling back to random seed.")
 
     # Fix all unnormalized Quaternions 
     for param_name, tensor in plan_particles.items():
@@ -545,34 +555,34 @@ def run_cutamp(
         plan_count = 0
         for idx in range(config.num_initial_plans):
             try:
-                custom_task_cost, plan_gen, candidate_poses_list = next(optimistic_plan_gen)
+                custom_task_cost, plan_gen, candidate_poses_dict = next(optimistic_plan_gen)
 
                 # ==================================================
                 # --- MANUAL SKELETON TOGGLE FOR DEBUGGING ---
                 # ==================================================
-                TEST_PICK_ONLY = False  # <--- Change to False to test Pick & Place
+                # TEST_PICK_ONLY = False  
                 
-                truncated_skeleton = []
-                for op in plan_gen:
-                    truncated_skeleton.append(op)
-                    op_name = op.operator.name if hasattr(op, 'operator') else op.name
+                # truncated_skeleton = []
+                # for op in plan_gen:
+                #     truncated_skeleton.append(op)
+                #     op_name = op.operator.name if hasattr(op, 'operator') else op.name
                     
-                    if TEST_PICK_ONLY and "Pick" in op_name:
-                        break # Stop immediately after the Pick!
-                    elif not TEST_PICK_ONLY and "Place" in op_name:
-                        break # Stop immediately after the first Place!
+                #     if TEST_PICK_ONLY and "Pick" in op_name:
+                #         break # Stop immediately after the Pick!
+                #     elif not TEST_PICK_ONLY and "Place" in op_name:
+                #         break # Stop immediately after the first Place!
                 
-                plan_gen = truncated_skeleton 
+                # plan_gen = truncated_skeleton 
                 
-                print("\n" + "="*60)
-                mode = "PICK ONLY" if TEST_PICK_ONLY else "PICK AND PLACE"
-                print(f"🔬 [DEBUG] EXECUTING ISOLATED SKELETON ({mode} - Length: {len(plan_gen)}):")
-                print(" -> ".join([op.name for op in plan_gen]))
-                print("="*60 + "\n")
+                # print("\n" + "="*60)
+                # mode = "PICK ONLY" if TEST_PICK_ONLY else "PICK AND PLACE"
+                # print(f" [DEBUG] EXECUTING ISOLATED SKELETON ({mode} - Length: {len(plan_gen)}):")
+                # print(" -> ".join([op.name for op in plan_gen]))
+                # print("="*60 + "\n")
                 # ==================================================
                 
                 plan_info, has_solution = sample_plan_skeleton(
-                    plan_gen, candidate_poses_list, world, config, timer, idx, constraint_checker, cost_reducer, particle_initializer
+                    plan_gen, candidate_poses_dict, world, config, timer, idx, constraint_checker, cost_reducer, particle_initializer
                 )
                 if plan_info is None:
                     _log.debug("failed subgraph, skipping...")
@@ -807,3 +817,13 @@ def run_cutamp(
     exp_logger.log_dict("multipliers", cost_reducer.cost_config)
     exp_logger.log_dict("tolerances", constraint_checker.constraint_config)
     return curobo_plan, winning_pose, overall_metrics["num_satisfying_final"]
+
+
+
+'''
+# TODO:
+
+i) Should I add AnyGrasp instead of sampling uniform grasps? For the final grasp pose, not the optimistic grasp pose.
+ii) If cuTAMP does not work properly, should I just shift to PB based motion generation? 
+
+'''

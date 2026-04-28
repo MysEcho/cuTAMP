@@ -65,7 +65,7 @@ def solve_curobo(
     last_q_name = "q0"
 
     # Top-Down Hover Distance (20cm directly above objects in World Space)
-    hover_z_distance = 0.20 
+    hover_z_distance = 0.25 
 
     # Accumulated plans that the real robot can actually execute
     last_op_type = None
@@ -300,6 +300,13 @@ def solve_curobo(
                 approach_result = motion_gen.plan_single(start_js, Pose.from_matrix(world_from_hover), plan_config)
                 if not approach_result.success:
                     raise RuntimeError(f"Failed to plan approach for {ground_op.name}. Status: {approach_result.status}")
+
+                # Turn the object into GHOST for the final descent
+                # cuRobo will reject the final 2mm if the attached object 
+                # touches the discard zone geometry. We temporarily disable
+                # the object to let it slide into place.
+                motion_gen.detach_object_from_robot("attached_object")
+                motion_gen.world_coll_checker.enable_obstacle(enable=False, name=obj)
 
                 # Plan Final Descent (Straight down into the PyTorch placement)
                 approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
