@@ -74,9 +74,9 @@ def solve_curobo(
     for idx, ground_op in enumerate(plan_skeleton):
         op_name = ground_op.operator.name
 
-        def is_target_of_pick_or_place(target_q_name):
+        def is_target_of_action_with_approach(target_q_name):
             for op in plan_skeleton:
-                if op.operator.name in ["Pick", "Place"] and op.values[-1] == target_q_name:
+                if op.operator.name in ["Pick", "Place", "Detect"] and op.values[-1] == target_q_name:
                     return True
             return False
 
@@ -86,7 +86,7 @@ def solve_curobo(
             if q_end in best_particle:
 
                 # DELEGATION: If moving to a grasp, let Pick handle it for safe approach
-                if is_target_of_pick_or_place(q_end):
+                if is_target_of_action_with_approach(q_end):
                     last_q_name = q_start
                     print(f"[{op_name}] Deferring global motion to target {q_end} to the Pick/Place block.")
                     continue
@@ -143,7 +143,7 @@ def solve_curobo(
             if q_end in best_particle:
                 
                 # DELEGATION: If moving to place, let Place handle it for a safe top-down approach
-                if is_target_of_pick_or_place(q_end):
+                if is_target_of_action_with_approach(q_end):
                     last_q_name = q_start
                     print(f"[{op_name}] Deferring global motion to target {q_end} to the Pick/Place block.")
                     continue 
@@ -386,14 +386,80 @@ def solve_curobo(
         elif op_name == Push.name or op_name == PushStick.name:
             raise NotImplementedError("Push and PushStick operations are not yet supported in cuRobo motion planning.")
         
+        # Detect
         elif op_name == "Detect":
             obj, pose_name, q_name = ground_op.values
             assert last_js is not None
+
+            with timer.time("curobo_planning"):
+                start_js = last_js
+                target_q = best_particle[q_name].clone()
+                target_js = JointState.from_position(target_q[None])
+
+                # Get the Cartesian pose of the camera target
+                world_from_detect_target = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
+
+                # Safe Hover
+                # Prevent arm from sweeping across the cluttered table.
+                SAFE_Z_ALTITUDE = 0.45 
+
+                # RETRACT: Go straight up from current position
+                world_from_ee_start = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
+                world_from_start_retract = world_from_ee_start.clone()
+                world_from_start_retract[2, 3] = max(world_from_start_retract[2, 3] + 0.1, SAFE_Z_ALTITUDE)
+                
+                retract_result = motion_gen.plan_single(start_js, Pose.from_matrix(world_from_start_retract), plan_config)
+                
+                if retract_result.success:
+                    retract_js = JointState.from_position(retract_result.get_interpolated_plan().position[-1:])
+                else:
+                    print("WARNING: Could not plan safe retract. Falling back to start state.")
+                    retract_js = start_js
+
+                # Move horizontally above the target
+                world_from_detect_hover = world_from_detect_target.clone()
+                world_from_detect_hover[2, 3] = max(world_from_detect_target[2, 3] + 0.1, SAFE_Z_ALTITUDE)
+                
+                transit_result = motion_gen.plan_single(retract_js, Pose.from_matrix(world_from_detect_hover), plan_config)
+                
+                if transit_result.success:
+                    transit_js = JointState.from_position(transit_result.get_interpolated_plan().position[-1:])
+                else:
+                    print("WARNING: High transit failed. Attempting direct transit.")
+                    transit_js = retract_js
+
+                # FINAL DESCENT: Plunge down to the actual Detect pose
+                end_result = motion_gen.plan_single_js(transit_js, target_js, plan_config)
+                
+                # Append the successful trajectory segments
+                if retract_result and retract_result.success:
+                    dt = retract_result.interpolation_dt
+                    plan = retract_result.get_interpolated_plan()
+                    accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
+                    ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+                    
+                if transit_result.success and transit_result is not retract_result:
+                    dt = transit_result.interpolation_dt
+                    plan = transit_result.get_interpolated_plan()
+                    accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
+                    ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+                    
+                if not end_result.success:
+                    raise RuntimeError(f"Failed to plan Detect sequence for {ground_op.name}.")
+                
+                dt = end_result.interpolation_dt
+                plan = end_result.get_interpolated_plan()
+                accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
+                last_js = JointState.from_position(plan[-1:].position)
+                ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+
             winning_pose = best_particle[pose_name].cpu().numpy()
-            
             print("\n" + "="*40)
             print(f"Executing Detect -> Camera shutter triggered at (xyz): {winning_pose[:3]}")
             print("="*40 + "\n")
+            
+            # Emit the Detect action so the PyBullet executor knows to pause for the callback!
+            accum_plans.append({"type": "detect", "target": obj})
             last_op_type = "Detect"
         else:
             raise NotImplementedError(f"Unsupported operator {op_name}")
