@@ -183,16 +183,28 @@ def solve_curobo(
                 world_from_hover = world_from_ee.clone()
                 world_from_hover[2, 3] += hover_z_distance
 
-                # Plan Local Retract (Only if backing out of a camera/Detect pose)
-                if last_q_name != "q0" and last_op_type != "Detect":
-                    world_from_ee_start = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
-                    world_from_start_retract = world_from_ee_start.clone()
-                    world_from_start_retract[2, 3] += hover_z_distance
-                    retract_result = motion_gen.plan_single(start_js, Pose.from_matrix(world_from_start_retract), plan_config)
-                    if not retract_result.success:
-                        raise RuntimeError(f"Failed to plan retract for {ground_op.name}. Status: {retract_result.status}")
+                # Plan Neutral Retract (Untwisting the wrist before transit)
+                world_from_ee_start = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
+                
+                # Create a waypoint 20cm straight up from the current position
+                world_from_start_retract = world_from_ee_start.clone()
+                world_from_start_retract[2, 3] += hover_z_distance
+                
+                # FORCE WRIST TO NEUTRAL: Point straight down [Roll=180, Pitch=0, Yaw=0]
+                # cuRobo expects top-down grasps to face the table (-Z)
+                neutral_rot = torch.tensor([
+                    [ 1.0,  0.0,  0.0],
+                    [ 0.0, -1.0,  0.0],
+                    [ 0.0,  0.0, -1.0]
+                ], dtype=torch.float32, device=world.device)
+                world_from_start_retract[:3, :3] = neutral_rot
+
+                retract_result = motion_gen.plan_single(start_js, Pose.from_matrix(world_from_start_retract), plan_config)
+                
+                if retract_result.success:
                     retract_js = JointState.from_position(retract_result.get_interpolated_plan().position[-1:])
                 else:
+                    print("WARNING: Could not untwist wrist. Falling back to start state.")
                     retract_result = None
                     retract_js = start_js
 
@@ -203,13 +215,15 @@ def solve_curobo(
                 
                 # Plan Final Descent (Straight down into the PyTorch grasp)
                 approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
+                
+                # Ghost the object so cuRobo doesn't panic during the descent
                 motion_gen.world_coll_checker.enable_obstacle(enable=False, name=obj) 
                 
                 end_result = motion_gen.plan_single_js(approach_js, target_js, plan_config)
+                
                 if not end_result.success:
                     motion_gen.world_coll_checker.enable_obstacle(enable=True, name=obj)
-                    _log.error(f"Start state: {motion_gen.check_start_state(approach_js)}, {motion_gen.check_constraints(approach_js)}")
-                    raise RuntimeError(f"Failed to plan from approach to end for {ground_op.name}. Status: {end_result.status}")
+                    raise RuntimeError(f"Failed to plan final grasp insertion for {ground_op.name}. Status: {end_result.status}")
 
             for result in [retract_result, approach_result, end_result]:
                 if result is None:
@@ -265,7 +279,7 @@ def solve_curobo(
             all_pos = torch.cat([last_js.position.expand(interp.shape[0], -1).cpu(), interp], dim=1)
             ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=0.02)
 
-            # Plan Lift / Retract (Pull object 20cm straight up out of the clutter)
+            # Plan Lift(Pull object 20cm straight up out of the clutter)
             lift_result = motion_gen.plan_single(last_js, Pose.from_matrix(world_from_hover), plan_config)
             if not lift_result.success:
                 raise RuntimeError(f"Failed to plan lift after grasping {ground_op.name}. Status: {lift_result.status}")
@@ -285,7 +299,7 @@ def solve_curobo(
             with timer.time("curobo_planning"):
                 start_js = last_js # The robot is currently hovering safely above the pick site
                 
-                # Use PyTorch's exact optimized joint state for the placement
+                # Use optimized joint state for the placement
                 target_q = best_particle[q].clone()
                 target_js = JointState.from_position(target_q[None])
 
@@ -357,7 +371,7 @@ def solve_curobo(
             all_pos = torch.cat([last_js.position.expand(interp.shape[0], -1).cpu(), interp], dim=1)
             ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=0.02)
 
-            # Plan Lift / Retract (Pull empty gripper 20cm straight up from discard)
+            # Plan Lift(Pull empty gripper 20cm straight up from discard)
             lift_result = motion_gen.plan_single(last_js, Pose.from_matrix(world_from_hover), plan_config)
             if not lift_result.success:
                 raise RuntimeError(f"Failed to plan lift after placing {ground_op.name}. Status: {lift_result.status}")

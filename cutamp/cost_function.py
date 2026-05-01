@@ -61,6 +61,7 @@ class CostFunction:
         self.valid_push_constraints = []
         self.valid_push_stick_constraints = []
         self.traj_length_costs = []
+        self.grasp_costs = []  
 
         type_to_list = {
             KinematicConstraint.type: self.kinematic_constraints,
@@ -73,8 +74,11 @@ class CostFunction:
             ValidPush.type: self.valid_push_constraints,
             ValidPushStick.type: self.valid_push_stick_constraints,
             TrajectoryLength.type: self.traj_length_costs,
+            GraspCost.type: self.grasp_costs,  # <--- REGISTERED GRASP COST
         }
-        warning_co = {GraspCost.type}
+        
+        warning_co = set() 
+        
         for ground_op in plan_skeleton:
             for co in [*ground_op.constraints, *ground_op.costs]:
                 if co.type not in type_to_list:
@@ -201,6 +205,39 @@ class CostFunction:
             raise RuntimeError(f"Expected conf params {self.traj_length_confs} but got {rollout['conf_params']}")
 
         self._rollout_validated = True
+
+    # Grasp Cost
+    def compute_grasp_costs(self, rollout: Rollout) -> Union[dict, None]:
+        """Grasp costs to ensure the gripper is perfectly centered and flush with the object."""
+        if not self.grasp_costs:
+            return None
+
+        grasp_vals = {}
+        for co in self.grasp_costs:
+            obj_name, grasp_var = co.params
+            
+            if grasp_var not in rollout:
+                continue
+                
+            grasp_tensor = rollout[grasp_var]
+            
+            # Penalize X, Y drift to center it, and Z offset to make it flush
+            xy_penalty = torch.sum(grasp_tensor[..., 0:2] ** 2, dim=-1)
+            z_penalty = grasp_tensor[..., 2] ** 2
+            
+            # We do not penalize Yaw (idx 3) so the wrist can align to geometry
+            cost = xy_penalty + z_penalty
+            grasp_vals[f"grasp_err_{grasp_var}"] = cost
+
+        if not grasp_vals:
+            return None
+
+        grasp_cost = {
+            "type": "cost",
+            "costs": self.grasp_costs,
+            "values": grasp_vals,
+        }
+        return grasp_cost
 
     def kinematic_costs(self, rollout: Rollout) -> Union[dict, None]:
         """Kinematic constraints - i.e., pose error between actual and desired end-effector poses."""
@@ -362,7 +399,6 @@ class CostFunction:
             activation_distance=self.config.gripper_activation_distance,
         )
 
-        # TODO: this is slow and a bottleneck, could consider using curobo's fast sphere-to-sphere kernel
         # Collision between movable objects
         for obj_1, obj_2 in itertools.combinations(self.world.movables, 2):
             obj_1_spheres = obj_to_spheres[obj_1.name]
@@ -445,6 +481,10 @@ class CostFunction:
             obj_pose = rollout["obj_to_pose"][obj.name]
             obj_spheres = transform_spheres(self.world.get_collision_spheres(obj), obj_pose)
             obj_to_spheres[obj.name] = obj_spheres
+
+        # Grasp Costs
+        grasp_cost = self.compute_grasp_costs(rollout)
+        add_cost(GraspCost.type, grasp_cost)
 
         # Collision costs
         collision_cost = self.collision_costs(rollout, obj_to_spheres)
