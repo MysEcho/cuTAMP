@@ -1,5 +1,4 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
 # NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
 # property and proprietary rights in and to this material, related
 # documentation and any modifications thereto. Any use, reproduction,
@@ -356,6 +355,8 @@ def yield_optimistic_skeletons(
             for step in cost_breakdown:
                 print(step)
             print(f"  = Total Traveled: {effort_distance:.3f}m")
+            print(f"  = Objects Ignored: {objects_to_ignore}")
+            print(f"  = Final Viz Cost : {total_vis_cost:.3f}")
             print(f"  = Final Task Cost (w/ Vis & Penalties): {total_task_cost:.3f}")
 
         scored_skeletons.append({
