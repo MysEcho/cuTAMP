@@ -233,6 +233,8 @@ def yield_optimistic_skeletons(
     scene_config: dict,
     scene_mapping: dict,
     world: TAMPWorld,
+    mission_target_name: str = "obj_0",    
+    target_visible: bool = False, 
     penalize_longer_plans: bool = False,
     verbose:bool = False,
 ) -> Iterator[Tuple[Any, List, dict]]: 
@@ -270,6 +272,14 @@ def yield_optimistic_skeletons(
             if "Pick" in op_base_name:
                 target_obj = op.values[0]
                 grasp_var_name = op.values[1]
+                
+                # Initial Occlusion Exception
+                if not target_visible and target_obj == mission_target_name:
+                    if len(objects_moved) == 0:
+                        # Attempting to pick the hidden target before moving anything else!
+                        effort_distance += 2000.0
+                        cost_breakdown.append(f"  + Pick({target_obj}) OCCLUSION PENALTY: 2000.000m (Target is hidden!)")
+                
                 objects_moved.add(target_obj) 
                 
                 best_xyz, dist, best_grasp_pose = sample_optimistic_grasps(target_obj, current_ee_xyz, world)
@@ -277,14 +287,24 @@ def yield_optimistic_skeletons(
                 effort_distance += dist
                 current_ee_xyz = best_xyz 
                 
-                if best_grasp_pose is not None:
-                    candidate_poses_dict[grasp_var_name] = [best_grasp_pose]
+                if best_grasp_pose is not None and not world.has_object(grasp_var_name):
+                    candidate_poses_dict[grasp_var_name] = torch.tensor(
+                        [best_grasp_pose], dtype=torch.float32, device=world.device
+                    )
                     
                 cost_breakdown.append(f"  + Pick({target_obj}) Travel: {dist:.3f}m")
 
             elif "Detect" in op_base_name:
                 target = op.values[0]
                 pose_var_name = op.values[1]
+                
+                # Initial Occlusion Penalty 
+                if not target_visible and target == mission_target_name:
+                    if len(objects_moved) == 0:
+                        # Attempting to detect the hidden target before moving anything else
+                        effort_distance += 2000.0
+                        cost_breakdown.append(f"  + Detect({target}) OCCLUSION PENALTY: 2000.000m (Target is hidden!)")
+
                 objects_to_ignore = list(objects_moved - {target})
                 
                 vis_cost, master_candidate_poses = cuTAMPUtilities.sample_NBV_for_cutamp(
@@ -293,7 +313,9 @@ def yield_optimistic_skeletons(
                     target_obj_name=target, ignore_objects=objects_to_ignore, verbose=False
                 )
                 optimistic_NBV_cost += vis_cost
-                candidate_poses_dict[pose_var_name] = master_candidate_poses
+                
+                if master_candidate_poses is not None and not world.has_object(pose_var_name):
+                    candidate_poses_dict[pose_var_name] = master_candidate_poses
                 
                 if master_candidate_poses is not None and len(master_candidate_poses) > 0:
                     viewpoint_xyz = master_candidate_poses[0][:3]
@@ -315,8 +337,10 @@ def yield_optimistic_skeletons(
                     effort_distance += dist
                     current_ee_xyz = best_xyz
                     
-                    if best_place_pose is not None:
-                        candidate_poses_dict[placement_var_name] = [best_place_pose]
+                    if best_place_pose is not None and not world.has_object(placement_var_name):
+                        candidate_poses_dict[placement_var_name] = torch.tensor(
+                            [best_place_pose], dtype=torch.float32, device=world.device
+                        )
                     
                     cost_breakdown.append(f"  + Place({target_obj}) Travel: {dist:.3f}m")
 
