@@ -330,7 +330,6 @@ def yield_optimistic_skeletons(
                 vis_cost, master_candidate_poses = cuTAMPUtilities.sample_NBV_for_cutamp(
                     global_belief=global_belief,
                     env_metadata=(scene_config, scene_mapping),
-                    plan_skeleton=skeleton,
                     plan_str=plan_str,
                     target_obj_name=target,
                     ignore_objects=objects_to_ignore,
