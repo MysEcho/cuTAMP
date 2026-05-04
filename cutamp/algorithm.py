@@ -955,7 +955,7 @@ def run_cutamp(
         if has_satisfying:
             found_solution = True
             if config.curobo_plan:
-                curobo_plan, winning_pose = solve_curobo(
+                curobo_plan, winning_pose_dict = solve_curobo(
                     plan_info,
                     best_particle,
                     world,
@@ -993,7 +993,7 @@ def run_cutamp(
     # Log constraint and cost multipliers
     exp_logger.log_dict("multipliers", cost_reducer.cost_config)
     exp_logger.log_dict("tolerances", constraint_checker.constraint_config)
-    return curobo_plan, winning_pose, overall_metrics["num_satisfying_final"]
+    return curobo_plan, winning_pose_dict, overall_metrics["num_satisfying_final"]
 
 
 """

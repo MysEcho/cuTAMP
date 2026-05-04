@@ -70,6 +70,7 @@ def solve_curobo(
     # Accumulated plans that the real robot can actually execute
     last_op_type = None
     accum_plans = []
+    winning_poses = {}
 
     for idx, ground_op in enumerate(plan_skeleton):
         op_name = ground_op.operator.name
@@ -481,10 +482,10 @@ def solve_curobo(
                 last_js = JointState.from_position(plan[-1:].position)
                 ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
 
-            winning_pose = best_particle[pose_name].cpu().numpy()
+            winning_poses[obj] = best_particle[pose_name].cpu().numpy()
 
             print("\n" + "=" * 40)
-            print(f"Executing Detect -> Camera shutter triggered at (xyz): {winning_pose[:3]}")
+            print(f"Executing Detect -> Camera shutter triggered at (xyz): {winning_poses[obj][:3]}")
             print("=" * 40 + "\n")
 
             # Emit the Detect action so the PyBullet executor knows to pause for the callback!
@@ -528,4 +529,4 @@ def solve_curobo(
         _log.debug("Planned to go home")
 
     _log.info(f"Motion planning metrics: {timer.get_summary('curobo_planning')}")
-    return accum_plans, winning_pose
+    return accum_plans, winning_poses
