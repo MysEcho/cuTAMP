@@ -668,6 +668,7 @@ def run_cutamp(
     scene_mapping: dict,
     global_belief: BeliefManager,
     config: TAMPConfiguration,
+    mission_target_name: str,
     cost_reducer: CostReducer,
     constraint_checker: ConstraintChecker,
     q_init: Optional[List[float]] = None,
@@ -714,6 +715,7 @@ def run_cutamp(
             scene_config,
             scene_mapping,
             world,
+            mission_target_name,
             penalize_longer_plans=False,
             verbose=verbose,
         )
