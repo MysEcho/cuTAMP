@@ -332,10 +332,14 @@ def yield_optimistic_skeletons(
                     env_metadata=(scene_config, scene_mapping),
                     plan_str=plan_str,
                     target_obj_name=target,
+                    current_ee_xyz=current_ee_xyz,
                     ignore_objects=objects_to_ignore,
                     verbose=False,
+                    motion_lambda=5.0,
+                    nbv_lambda=1.0,
                 )
-                optimistic_NBV_cost += vis_cost
+                if target == mission_target_name:
+                    optimistic_NBV_cost = vis_cost
 
                 if master_candidate_poses is not None and not world.has_object(pose_var_name):
                     candidate_poses_dict[pose_var_name] = master_candidate_poses
@@ -674,6 +678,7 @@ def run_cutamp(
     q_init: Optional[List[float]] = None,
     experiment_id: Optional[str] = None,
     verbose: bool = False,
+    num_plan_skeletons: int = 30,
 ):
     """Overall cuTAMP algorithm implementation."""
 
@@ -694,7 +699,7 @@ def run_cutamp(
     #     )
 
     # Retrieve top K Plan skeletons
-    K = 30
+    K = num_plan_skeletons
     with timer.time("get_top_k_plans", log_callback=_log.info):
         top_k_skeletons = get_top_k_plan_skeletons(
             world.initial_state,
