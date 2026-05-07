@@ -347,6 +347,7 @@ def yield_optimistic_skeletons(
                     verbose=False,
                     motion_lambda=5.0,
                     nbv_lambda=1.0,
+                    visualize_viewpoints=False,
                 )
                 if target == mission_target_name:
                     optimistic_NBV_cost = vis_cost
@@ -720,7 +721,7 @@ def run_cutamp(
         )
 
     # Isolation Test
-    cuTAMPUtilities.test_symbolic_task_planner(top_k_skeletons, verbose=True)
+    # cuTAMPUtilities.test_symbolic_task_planner(top_k_skeletons, verbose=True)
 
     # Select Best skeleton based on Optimistic NBV simulation
     with timer.time("optimistic_evaluation"):
