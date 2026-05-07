@@ -138,8 +138,18 @@ def sample_optimistic_grasps(obj_name: str, current_ee_xyz: list, world: TAMPWor
 
         for _ in range(num_samples):
             yaw = np.random.uniform(-np.pi, np.pi)
-            target_pos = [obj_xyz[0], obj_xyz[1], obj_xyz[2] + 0.13]
-            target_quat = p.getQuaternionFromEuler([np.pi, 0.0, yaw])  # Top-down grasp
+            for _ in range(num_samples):
+                yaw = np.random.uniform(-np.pi, np.pi)
+
+                if obj_xyz[2] < 0.5:
+                    # TABLETOP: Top-Down Grasp
+                    target_pos = [obj_xyz[0], obj_xyz[1], obj_xyz[2] + 0.13]
+                    target_quat = p.getQuaternionFromEuler([np.pi, 0.0, yaw])
+                else:
+                    # SHELF: Lateral Grasp (Approach from +X towards -X)
+                    # Note: Panda lateral Euler is typically Pitch = pi/2
+                    target_pos = [obj_xyz[0] + 0.15, obj_xyz[1], obj_xyz[2]]
+                    target_quat = p.getQuaternionFromEuler([np.pi / 2, np.pi / 2, 0.0])
 
             # calculateInverseKinematics returns joint angles. If it executes
             # successfully, the pose is kinematically feasible for heuristic
@@ -710,7 +720,7 @@ def run_cutamp(
         )
 
     # Isolation Test
-    # cuTAMPUtilities.test_symbolic_task_planner(top_k_skeletons,verbose=True)
+    cuTAMPUtilities.test_symbolic_task_planner(top_k_skeletons, verbose=True)
 
     # Select Best skeleton based on Optimistic NBV simulation
     with timer.time("optimistic_evaluation"):
