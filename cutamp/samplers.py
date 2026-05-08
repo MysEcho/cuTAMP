@@ -132,11 +132,14 @@ def grasp_4dof_sampler(
 def grasp_6dof_sampler(num_samples: int, obj: Obstacle, num_faces: Optional[int] = None):
     """
     Sample 6-DOF grasps for the given object in the object's coordinate frame.
-    Fully unclamped to allow PyTorch to explore all faces and find the collision-free shelf opening.
+    Fully unclamped X/Y translation, but strictly horizontal pitch for shelf scenes.
     """
     # SO(3) Continuous Orientation
     roll = torch.empty(num_samples, device=obj.tensor_args.device).uniform_(-torch.pi, torch.pi)
-    pitch = torch.empty(num_samples, device=obj.tensor_args.device).uniform_(-0.2, 0.2)
+
+    # Lock pitch to exactly 0 so the wrist is perfectly horizontal/level
+    pitch = torch.zeros(num_samples, device=obj.tensor_args.device)
+
     yaw = torch.empty(num_samples, device=obj.tensor_args.device).uniform_(-torch.pi, torch.pi)
     rpy = torch.stack([roll, pitch, yaw], dim=1)
 
