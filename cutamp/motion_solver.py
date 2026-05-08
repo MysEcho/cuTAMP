@@ -181,54 +181,31 @@ def solve_curobo(
                 target_q = best_particle[q].clone()
                 target_js = JointState.from_position(target_q[None])
 
-                # Calculate strictly top-down approach pose (20cm above the PyTorch optimized grasp)
-                world_from_ee = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
-                world_from_hover = world_from_ee.clone()
-                world_from_hover[2, 3] += hover_z_distance
+                # Get the final 6-DOF grasp pose optimized by PyTorch
+                world_from_ee_deep = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
 
-                # Plan Neutral Retract (Untwisting the wrist before transit)
-                world_from_ee_start = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
+                # 1. DYNAMIC HOVER: Move back along the TOOL'S local Z-axis
+                local_hover_shift = torch.eye(4, dtype=torch.float32, device=world.device)
+                local_hover_shift[2, 3] = -hover_z_distance  # Pull back along the tool's approach vector
+                world_from_hover = world_from_ee_deep @ local_hover_shift
 
-                # Create a waypoint 20cm straight up from the current position
-                world_from_start_retract = world_from_ee_start.clone()
-                world_from_start_retract[2, 3] += hover_z_distance
+                # 2. REMOVE NEUTRAL WRIST TWIST
+                # Let cuRobo figure out the safest transit from the Detect pose to the Hover pose
+                # without artificially forcing the wrist to point straight down.
+                approach_result = motion_gen.plan_single(start_js, Pose.from_matrix(world_from_hover), plan_config)
 
-                # FORCE WRIST TO NEUTRAL: Point straight down [Roll=180, Pitch=0, Yaw=0]
-                # cuRobo expects top-down grasps to face the table (-Z)
-                neutral_rot = torch.tensor(
-                    [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], dtype=torch.float32, device=world.device
-                )
-                world_from_start_retract[:3, :3] = neutral_rot
-
-                retract_result = motion_gen.plan_single(
-                    start_js, Pose.from_matrix(world_from_start_retract), plan_config
-                )
-
-                if retract_result.success:
-                    retract_js = JointState.from_position(retract_result.get_interpolated_plan().position[-1:])
-                else:
-                    print("WARNING: Could not untwist wrist. Falling back to start state.")
-                    retract_result = None
-                    retract_js = start_js
-
-                # Plan Global Transit (across the workspace to hover exactly above the object)
-                approach_result = motion_gen.plan_single(retract_js, Pose.from_matrix(world_from_hover), plan_config)
                 if not approach_result.success:
                     raise RuntimeError(
-                        f"Failed to plan approach for {ground_op.name}. Status: {approach_result.status}"
+                        f"Failed to plan approach hover for {ground_op.name}. Status: {approach_result.status}"
                     )
 
-                # Plan Final Descent (Straight down into the PyTorch grasp)
+                # Plan Final Descent (Slide perfectly straight along the tool's Z-axis into the grasp)
                 approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
 
                 # Ghost the object so cuRobo doesn't panic during the descent
                 motion_gen.world_coll_checker.enable_obstacle(enable=False, name=obj)
 
-                world_from_ee_deep = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
-
                 stopping_distance = 0.035
-
-                # Shift along Z axis(only configured for top-down grasps not lateral grasps)
                 local_shift = torch.eye(4, dtype=torch.float32, device=world.device)
                 local_shift[2, 3] = -stopping_distance
 
@@ -242,9 +219,8 @@ def solve_curobo(
                         f"Failed to plan final grasp insertion for {ground_op.name}. Status: {end_result.status}"
                     )
 
-            for result in [retract_result, approach_result, end_result]:
-                if result is None:
-                    continue
+            # Append successful approach trajectories
+            for result in [approach_result, end_result]:
                 dt = result.interpolation_dt
                 plan = result.get_interpolated_plan()
                 accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
@@ -300,10 +276,12 @@ def solve_curobo(
             all_pos = torch.cat([last_js.position.expand(interp.shape[0], -1).cpu(), interp], dim=1)
             ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=0.02)
 
-            # Plan Lift(Pull object 20cm straight up out of the clutter)
+            # 3. SAFE EXTRACTION: Pull the object back out to the lateral hover pose instead of straight UP
             lift_result = motion_gen.plan_single(last_js, Pose.from_matrix(world_from_hover), plan_config)
             if not lift_result.success:
-                raise RuntimeError(f"Failed to plan lift after grasping {ground_op.name}. Status: {lift_result.status}")
+                raise RuntimeError(
+                    f"Failed to extract object after grasping {ground_op.name}. Status: {lift_result.status}"
+                )
 
             dt = lift_result.interpolation_dt
             plan = lift_result.get_interpolated_plan()
