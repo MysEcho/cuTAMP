@@ -433,9 +433,10 @@ def solve_curobo(
                 # Get the Cartesian pose of the camera target
                 world_from_detect_target = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
 
-                # Safe Hover
-                # Prevent arm from sweeping across the cluttered table.
+                # Safe Hover for tabletop scene
                 SAFE_Z_ALTITUDE = 0.45
+                # Safe Hover for shelf scene
+                SAFE_X_DIST = 0.25
 
                 # RETRACT: Go straight up from current position
                 world_from_ee_start = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
@@ -452,9 +453,14 @@ def solve_curobo(
                     print("WARNING: Could not plan safe retract. Falling back to start state.")
                     retract_js = start_js
 
-                # Move horizontally above the target
+                is_target_top_down = world_from_detect_target[2, 2] < -0.5
                 world_from_detect_hover = world_from_detect_target.clone()
-                world_from_detect_hover[2, 3] = max(world_from_detect_target[2, 3] + 0.1, SAFE_Z_ALTITUDE)
+
+                # Universal Hovering
+                if is_target_top_down:
+                    world_from_detect_hover[2, 3] = max(world_from_detect_target[2, 3] + 0.1, SAFE_Z_ALTITUDE)
+                else:
+                    world_from_detect_hover[0, 3] += SAFE_X_DIST
 
                 transit_result = motion_gen.plan_single(
                     retract_js, Pose.from_matrix(world_from_detect_hover), plan_config
@@ -466,7 +472,7 @@ def solve_curobo(
                     print("WARNING: High transit failed. Attempting direct transit.")
                     transit_js = retract_js
 
-                # FINAL DESCENT: Plunge down to the actual Detect pose
+                # FINAL DESCENT: Slide laterally (or vertically) to the actual Detect pose
                 end_result = motion_gen.plan_single_js(transit_js, target_js, plan_config)
 
                 # Append the successful trajectory segments
