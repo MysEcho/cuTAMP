@@ -88,70 +88,36 @@ def grasp_4dof_sampler(
     return grasp_4dof
 
 
-# def grasp_6dof_sampler(num_samples: int, obj: Obstacle, num_faces: Optional[int] = None) -> Grasp6DOF:
-#     """
-#     Sample 6-DOF grasps for the given object in the object's coordinate frame.
-#     Note: this is a very simple sampler which was written for the bookshelf domain and isn't general enough.
-#     """
-#     assert isinstance(obj, Cuboid), "only Cuboid objects supported for 6-dof grasps right now"
-#     # Sample roll from discrete choices
-#     roll_choices = torch.tensor(
-#         [-torch.pi / 2, -torch.pi / 3, -torch.pi / 4, torch.pi / 4, torch.pi / 3, torch.pi / 2],
-#         device=obj.tensor_args.device,
-#     )
-#     roll_idxs = torch.randint(0, len(roll_choices), (num_samples,), device=obj.tensor_args.device)
-#     roll = roll_choices[roll_idxs]
-
-#     # Let pitch be zero for now
-#     pitch = torch.zeros(num_samples, device=obj.tensor_args.device)
-
-#     # Sample yaw from discrete choices
-#     yaw_choices = torch.tensor([-torch.pi / 2, torch.pi / 2], device=obj.tensor_args.device)
-#     yaw_idxs = torch.randint(0, 2, (num_samples,), device=obj.tensor_args.device)
-#     yaw = yaw_choices[yaw_idxs]
-
-#     # Stack rpy
-#     rpy = torch.stack([roll, pitch, yaw], dim=1)
-
-#     # Compute offsets for gripper translation in object frame
-#     half_extents = obj.tensor_args.to_device([dim / 2 for dim in obj.dims])
-#     gripper_offset = 0.01
-#     upper = (half_extents - gripper_offset).clamp(min=0.0)
-#     lower = (obj.tensor_args.to_device(3 * [gripper_offset])).clamp(max=upper)
-#     lower[0] = upper[0] = 0.0  # remove translation in x-axis
-
-#     # Sample translation between bounds
-#     translation = torch.rand(num_samples, 3, device=obj.tensor_args.device)
-#     translation = lower + (upper - lower) * translation
-
-#     # Form 6-DOF grasps
-#     grasp_6dof = torch.cat([translation, rpy], dim=1)
-#     return grasp_6dof
-
-
-def grasp_6dof_sampler(num_samples: int, obj: Obstacle, num_faces: Optional[int] = None):
+def grasp_6dof_sampler(num_samples: int, obj: Obstacle, num_faces: Optional[int] = None) -> torch.Tensor:
     """
     Sample 6-DOF grasps for the given object in the object's coordinate frame.
-    Fully unclamped to allow PyTorch to explore all faces and find the collision-free shelf opening.
+    Roll is discrete, Pitch is 0 (horizontal), Yaw is continuous.
     """
-    # SO(3) Continuous Orientation
-    roll = torch.empty(num_samples, device=obj.tensor_args.device).uniform_(-torch.pi, torch.pi)
-    pitch = torch.empty(num_samples, device=obj.tensor_args.device).uniform_(-0.2, 0.2)
+    assert isinstance(obj, Cuboid), "only Cuboid objects supported for 6-dof grasps right now"
+
+    # Keep fingers perfectly square (horizontal or vertical)
+    roll_choices = torch.tensor([0.0, torch.pi / 2, torch.pi, -torch.pi / 2], device=obj.tensor_args.device)
+    roll_idxs = torch.randint(0, 4, (num_samples,), device=obj.tensor_args.device)
+    roll = roll_choices[roll_idxs]
+
+    # Must be exactly 0.0 to keep the arm perfectly horizontal/level with the shelf.
+    pitch = torch.zeros(num_samples, device=obj.tensor_args.device)
+
+    # Because the object is rotated (yaw=1.5), the optimizer must be allowed
+    # to naturally rotate the hand so the arm points out the front of the shelf.
     yaw = torch.empty(num_samples, device=obj.tensor_args.device).uniform_(-torch.pi, torch.pi)
+
     rpy = torch.stack([roll, pitch, yaw], dim=1)
 
-    # Allow the TCP to slide anywhere inside the safe bounding box
+    # UNCLAMPED TRANSLATION
     half_extents = obj.tensor_args.to_device([dim / 2 for dim in obj.dims])
-    gripper_offset = 0.015  # Give slightly more meat for the fingers to grab
-
+    gripper_offset = 0.015
     upper = (half_extents - gripper_offset).clamp(min=0.0)
-    lower = -upper  # Allow negative offsets to grab the opposite sides of the box
+    lower = -upper
 
-    # Sample translation symmetrically around the box center
     translation = torch.rand(num_samples, 3, device=obj.tensor_args.device)
     translation = lower + (upper - lower) * translation
 
-    # Form 6-DOF grasps
     grasp_6dof = torch.cat([translation, rpy], dim=1)
     return grasp_6dof
 
@@ -202,3 +168,44 @@ def place_4dof_sampler(
     yaw = sample_yaw(num_samples, None, obj.tensor_args.device)
     place_4dof = torch.cat([xyz_surface, yaw.unsqueeze(-1)], dim=1)
     return place_4dof
+
+
+# def grasp_6dof_sampler(num_samples: int, obj: Obstacle, num_faces: Optional[int] = None) -> Grasp6DOF:
+#     """
+#     Sample 6-DOF grasps for the given object in the object's coordinate frame.
+#     Note: this is a very simple sampler which was written for the bookshelf domain and isn't general enough.
+#     """
+#     assert isinstance(obj, Cuboid), "only Cuboid objects supported for 6-dof grasps right now"
+#     # Sample roll from discrete choices
+#     roll_choices = torch.tensor(
+#         [-torch.pi / 2, -torch.pi / 3, -torch.pi / 4, torch.pi / 4, torch.pi / 3, torch.pi / 2],
+#         device=obj.tensor_args.device,
+#     )
+#     roll_idxs = torch.randint(0, len(roll_choices), (num_samples,), device=obj.tensor_args.device)
+#     roll = roll_choices[roll_idxs]
+
+#     # Let pitch be zero for now
+#     pitch = torch.zeros(num_samples, device=obj.tensor_args.device)
+
+#     # Sample yaw from discrete choices
+#     yaw_choices = torch.tensor([-torch.pi / 2, torch.pi / 2], device=obj.tensor_args.device)
+#     yaw_idxs = torch.randint(0, 2, (num_samples,), device=obj.tensor_args.device)
+#     yaw = yaw_choices[yaw_idxs]
+
+#     # Stack rpy
+#     rpy = torch.stack([roll, pitch, yaw], dim=1)
+
+#     # Compute offsets for gripper translation in object frame
+#     half_extents = obj.tensor_args.to_device([dim / 2 for dim in obj.dims])
+#     gripper_offset = 0.01
+#     upper = (half_extents - gripper_offset).clamp(min=0.0)
+#     lower = (obj.tensor_args.to_device(3 * [gripper_offset])).clamp(max=upper)
+#     lower[0] = upper[0] = 0.0  # remove translation in x-axis
+
+#     # Sample translation between bounds
+#     translation = torch.rand(num_samples, 3, device=obj.tensor_args.device)
+#     translation = lower + (upper - lower) * translation
+
+#     # Form 6-DOF grasps
+#     grasp_6dof = torch.cat([translation, rpy], dim=1)
+#     return grasp_6dof

@@ -750,25 +750,28 @@ def run_cutamp(
                 # ==================================================
                 # --- MANUAL SKELETON TOGGLE FOR DEBUGGING ---
                 # ==================================================
-                # TEST_PICK_ONLY = False
+                # TEST_DETECT_ONLY = True
+                # TEST_PICK_ONLY = True
 
                 # truncated_skeleton = []
                 # for op in plan_gen:
                 #     truncated_skeleton.append(op)
-                #     op_name = op.operator.name if hasattr(op, 'operator') else op.name
+                #     op_name = op.operator.name if hasattr(op, "operator") else op.name
 
-                #     if TEST_PICK_ONLY and "Pick" in op_name:
-                #         break # Stop immediately after the Pick!
-                #     elif not TEST_PICK_ONLY and "Place" in op_name:
-                #         break # Stop immediately after the first Place!
+                #     if TEST_DETECT_ONLY and not TEST_PICK_ONLY and "Detect" in op_name:
+                #         break
+                #     elif TEST_DETECT_ONLY and TEST_PICK_ONLY and "Pick" in op_name:
+                #         break  # Stop immediately after the Pick!
+                #     elif not TEST_DETECT_ONLY and not TEST_PICK_ONLY and "Place" in op_name:
+                #         break  # Stop immediately after the first Place!
 
                 # plan_gen = truncated_skeleton
 
-                # print("\n" + "="*60)
+                # print("\n" + "=" * 60)
                 # mode = "PICK ONLY" if TEST_PICK_ONLY else "PICK AND PLACE"
                 # print(f" [DEBUG] EXECUTING ISOLATED SKELETON ({mode} - Length: {len(plan_gen)}):")
                 # print(" -> ".join([op.name for op in plan_gen]))
-                # print("="*60 + "\n")
+                # print("=" * 60 + "\n")
                 # ==================================================
 
                 plan_info, has_solution = sample_plan_skeleton(

@@ -181,24 +181,30 @@ def solve_curobo(
                 target_q = best_particle[q].clone()
                 target_js = JointState.from_position(target_q[None])
 
-                # Calculate strictly top-down approach pose (20cm above the PyTorch optimized grasp)
-                world_from_ee = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
-                world_from_hover = world_from_ee.clone()
-                world_from_hover[2, 3] += hover_z_distance
+                # Get target pose to determine approach direction
+                world_from_ee_deep = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
+
+                # Pull back 20cm along the Tool's Local Z-Axis (slides up for tables and back for shelves)
+                local_shift_hover = torch.eye(4, dtype=torch.float32, device=world.device)
+                local_shift_hover[2, 3] = -hover_z_distance
+                world_from_hover = world_from_ee_deep @ local_shift_hover
 
                 # Plan Neutral Retract (Untwisting the wrist before transit)
                 world_from_ee_start = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
+                is_start_top_down = world_from_ee_start[2, 2] < -0.5
 
-                # Create a waypoint 20cm straight up from the current position
-                world_from_start_retract = world_from_ee_start.clone()
-                world_from_start_retract[2, 3] += hover_z_distance
+                if is_start_top_down:
+                    world_from_start_retract = world_from_ee_start.clone()
+                    world_from_start_retract[2, 3] += hover_z_distance
 
-                # FORCE WRIST TO NEUTRAL: Point straight down [Roll=180, Pitch=0, Yaw=0]
-                # cuRobo expects top-down grasps to face the table (-Z)
-                neutral_rot = torch.tensor(
-                    [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], dtype=torch.float32, device=world.device
-                )
-                world_from_start_retract[:3, :3] = neutral_rot
+                    # FORCE WRIST TO NEUTRAL
+                    neutral_rot = torch.tensor(
+                        [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], dtype=torch.float32, device=world.device
+                    )
+                    world_from_start_retract[:3, :3] = neutral_rot
+                else:
+                    # LATERAL RETRACT: Pull straight back along the tool's local Z axis
+                    world_from_start_retract = world_from_ee_start @ local_shift_hover
 
                 retract_result = motion_gen.plan_single(
                     start_js, Pose.from_matrix(world_from_start_retract), plan_config
@@ -211,28 +217,32 @@ def solve_curobo(
                     retract_result = None
                     retract_js = start_js
 
-                # Plan Global Transit (across the workspace to hover exactly above the object)
+                # Plan Global Transit (across the workspace to the Local Hover pose)
                 approach_result = motion_gen.plan_single(retract_js, Pose.from_matrix(world_from_hover), plan_config)
                 if not approach_result.success:
                     raise RuntimeError(
                         f"Failed to plan approach for {ground_op.name}. Status: {approach_result.status}"
                     )
 
-                # Plan Final Descent (Straight down into the PyTorch grasp)
+                # Plan Final Descent (Straight into the PyTorch grasp)
                 approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
 
                 # Ghost the object so cuRobo doesn't panic during the descent
                 motion_gen.world_coll_checker.enable_obstacle(enable=False, name=obj)
 
-                world_from_ee_deep = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
+                # Grasp Stopping Offset
+                world_from_ee = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
+                is_top_down = world_from_ee[2, 2] < -0.5
 
-                stopping_distance = 0.035
+                if is_top_down:
+                    stopping_distance = 0.035
+                else:
+                    stopping_distance = 0.0
 
-                # Shift along Z axis(only configured for top-down grasps not lateral grasps)
-                local_shift = torch.eye(4, dtype=torch.float32, device=world.device)
-                local_shift[2, 3] = -stopping_distance
+                local_shift_stop = torch.eye(4, dtype=torch.float32, device=world.device)
+                local_shift_stop[2, 3] = -stopping_distance
 
-                shallow_stop_pose = world_from_ee_deep @ local_shift
+                shallow_stop_pose = world_from_ee_deep @ local_shift_stop
 
                 end_result = motion_gen.plan_single(approach_js, Pose.from_matrix(shallow_stop_pose), plan_config)
 
@@ -251,7 +261,6 @@ def solve_curobo(
                 last_js = JointState.from_position(plan[-1:].position)
                 ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
 
-            # Temporarily monkey patch get_bounding_spheres to return the spheres we sampled
             obstacle = motion_gen.world_model.get_obstacle(obj)
             obstacle.old_get_bounding_spheres = obstacle.get_bounding_spheres
 
@@ -277,7 +286,6 @@ def solve_curobo(
 
             obstacle.get_bounding_spheres = get_bounding_spheres.__get__(obstacle)
 
-            # Attach the object to the robot
             with timer.time("curobo_planning"):
                 motion_gen.attach_objects_to_robot(
                     last_js,
@@ -300,7 +308,7 @@ def solve_curobo(
             all_pos = torch.cat([last_js.position.expand(interp.shape[0], -1).cpu(), interp], dim=1)
             ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=0.02)
 
-            # Plan Lift(Pull object 20cm straight up out of the clutter)
+            # Plan Lift (Extract out of the clutter using the perfectly aligned hover pose)
             lift_result = motion_gen.plan_single(last_js, Pose.from_matrix(world_from_hover), plan_config)
             if not lift_result.success:
                 raise RuntimeError(f"Failed to plan lift after grasping {ground_op.name}. Status: {lift_result.status}")
@@ -318,34 +326,37 @@ def solve_curobo(
             assert last_js is not None
 
             with timer.time("curobo_planning"):
-                start_js = last_js  # The robot is currently hovering safely above the pick site
+                start_js = last_js
 
-                # Use optimized joint state for the placement
                 target_q = best_particle[q].clone()
                 target_js = JointState.from_position(target_q[None])
 
-                # Calculate strictly top-down hover pose over the discard zone
                 world_from_ee = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
                 world_from_ee_start = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
 
-                world_from_hover = world_from_ee.clone()
-                world_from_hover[2, 3] += hover_z_distance
+                # UNIVERSAL HOVER FOR PLACE
+                local_shift_hover = torch.eye(4, dtype=torch.float32, device=world.device)
+                local_shift_hover[2, 3] = -hover_z_distance
 
-                # Plan safe crossing above the table to the discard zone
+                is_top_down = world_from_ee[2, 2] < -0.5
+
+                if is_top_down:
+                    world_from_hover = world_from_ee.clone()
+                    world_from_hover[2, 3] += hover_z_distance
+                else:
+                    world_from_hover = world_from_ee @ local_shift_hover
+
+                # Plan safe crossing above the table to the hover pose
                 approach_result = motion_gen.plan_single(start_js, Pose.from_matrix(world_from_hover), plan_config)
                 if not approach_result.success:
                     raise RuntimeError(
                         f"Failed to plan approach for {ground_op.name}. Status: {approach_result.status}"
                     )
 
-                # Turn the object into GHOST for the final descent
-                # cuRobo will reject the final 2mm if the attached object
-                # touches the discard zone geometry. We temporarily disable
-                # the object to let it slide into place.
                 motion_gen.detach_object_from_robot("attached_object")
                 motion_gen.world_coll_checker.enable_obstacle(enable=False, name=obj)
 
-                # Plan Final Descent (Straight down into the PyTorch placement)
+                # Plan Final Descent
                 approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
                 end_result = motion_gen.plan_single_js(approach_js, target_js, plan_config)
                 if not end_result.success:
@@ -363,7 +374,6 @@ def solve_curobo(
                 accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
                 last_js = JointState.from_position(plan[-1:].position)
 
-                # Forward kinematics to update object position during transit
                 robot_state = world.kin_model.get_state(plan.position)
                 world_from_ee_traj = robot_state.ee_pose.get_matrix()
                 world_from_obj = world_from_ee_traj @ ee_from_obj
@@ -377,7 +387,6 @@ def solve_curobo(
                 )
                 obj_to_current_pose[obj] = world_from_obj[-1]
 
-            # Detach object from robot and enable collision again
             with timer.time("curobo_planning"):
                 motion_gen.detach_object_from_robot("attached_object")
                 motion_gen.world_coll_checker.enable_obstacle(enable=True, name=obj)
@@ -396,7 +405,7 @@ def solve_curobo(
             all_pos = torch.cat([last_js.position.expand(interp.shape[0], -1).cpu(), interp], dim=1)
             ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=0.02)
 
-            # Plan Lift(Pull empty gripper 20cm straight up from discard)
+            # Plan Lift
             lift_result = motion_gen.plan_single(last_js, Pose.from_matrix(world_from_hover), plan_config)
             if not lift_result.success:
                 raise RuntimeError(f"Failed to plan lift after placing {ground_op.name}. Status: {lift_result.status}")
@@ -424,9 +433,10 @@ def solve_curobo(
                 # Get the Cartesian pose of the camera target
                 world_from_detect_target = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
 
-                # Safe Hover
-                # Prevent arm from sweeping across the cluttered table.
+                # Safe Hover for tabletop scene
                 SAFE_Z_ALTITUDE = 0.45
+                # Safe Hover for shelf scene
+                SAFE_X_DIST = 0.25
 
                 # RETRACT: Go straight up from current position
                 world_from_ee_start = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
@@ -443,9 +453,14 @@ def solve_curobo(
                     print("WARNING: Could not plan safe retract. Falling back to start state.")
                     retract_js = start_js
 
-                # Move horizontally above the target
+                is_target_top_down = world_from_detect_target[2, 2] < -0.5
                 world_from_detect_hover = world_from_detect_target.clone()
-                world_from_detect_hover[2, 3] = max(world_from_detect_target[2, 3] + 0.1, SAFE_Z_ALTITUDE)
+
+                # Universal Hovering
+                if is_target_top_down:
+                    world_from_detect_hover[2, 3] = max(world_from_detect_target[2, 3] + 0.1, SAFE_Z_ALTITUDE)
+                else:
+                    world_from_detect_hover[0, 3] += SAFE_X_DIST
 
                 transit_result = motion_gen.plan_single(
                     retract_js, Pose.from_matrix(world_from_detect_hover), plan_config
@@ -457,7 +472,7 @@ def solve_curobo(
                     print("WARNING: High transit failed. Attempting direct transit.")
                     transit_js = retract_js
 
-                # FINAL DESCENT: Plunge down to the actual Detect pose
+                # FINAL DESCENT: Slide laterally (or vertically) to the actual Detect pose
                 end_result = motion_gen.plan_single_js(transit_js, target_js, plan_config)
 
                 # Append the successful trajectory segments
