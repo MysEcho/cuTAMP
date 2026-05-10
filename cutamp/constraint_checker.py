@@ -59,6 +59,12 @@ class ConstraintChecker:
     def get_mask(self, cost_dict: Dict[str, dict], verbose: bool = True) -> Bool[torch.Tensor, "num_particles"]:
         """Get the satisfying mask for the constraints given the costs."""
         overall_mask = None
+
+        if verbose:
+            print("\n" + "-" * 50)
+            print("[CONSTRAINT TRACKER] Particle Survival Cascade")
+            print("-" * 50)
+
         for cost_type, cost_info in cost_dict.items():
             # Ignore non-constraints
             if cost_info["type"] != "constraint":
@@ -72,10 +78,13 @@ class ConstraintChecker:
                 overall_mask = mask if overall_mask is None else overall_mask & mask
 
                 if verbose:
-                    _log.debug(
-                        f"[{cost_type}] {name} <= {tol} has {mask.sum()}/{mask.shape[0]} satisfying, "
-                        f"{overall_mask.sum()} remaining"
+                    print(
+                        f"  -> [{cost_type}] '{name}' (Limit: <={tol}): "
+                        f"{mask.sum()}/{mask.shape[0]} passed | Total Surviving: {overall_mask.sum()}"
                     )
 
         assert overall_mask is not None, "No constraints found in cost dict"
+        if verbose:
+            print("-" * 50 + "\n")
+
         return overall_mask

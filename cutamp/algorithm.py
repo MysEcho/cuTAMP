@@ -537,7 +537,7 @@ def sample_plan_skeleton(
                     if isinstance(sub_val, torch.Tensor):
                         max_val = sub_val.max().item()
                         min_val = sub_val.min().item()
-                        if min_val > 1.0:  # If even the BEST particle has a high cost, we have a geometry problem
+                        if min_val > 0.5:  # If even the best particle has a high cost, it's a geometry problem
                             print(
                                 f"  [!] EXPLOSION in {key} -> {sub_key} | Min Cost: {min_val:.3f} | Max: {max_val:.3f}"
                             )
@@ -545,19 +545,21 @@ def sample_plan_skeleton(
             elif isinstance(val, torch.Tensor):
                 max_val = val.max().item()
                 min_val = val.min().item()
-                if min_val > 1.0:
+                if min_val > 0.5:
                     print(f"  [!] EXPLOSION in {key} | Min Cost: {min_val:.3f} | Max Cost: {max_val:.3f}")
                     found_explosions = True
 
         if not found_explosions:
-            print("  [✓] All actions look mathematically safe! (Min costs < 1.0)")
+            print("  [✓] All actions look mathematically safe! (Min costs < 0.5)")
         print("=====================================================================\n")
         heuristic = heuristic_fn(plan_skeleton, cost_dict, constraint_checker)
 
+    print("Heuristic Cost for this plan: ", heuristic)
     # Number of satisfying particles
     with timer.time("get_satisfying_mask"):
         satisfying_mask = constraint_checker.get_mask(cost_dict)
     num_satisfying = satisfying_mask.sum().item()
+    print("Number of solutions for this plan: ", num_satisfying)
 
     if config.stick_button_experiment and num_satisfying > 0:
         # Custom logic in stick button for breaking early for sampling baseline
