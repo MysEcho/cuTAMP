@@ -7,18 +7,18 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-from typing import List, Dict, TypedDict
+from typing import Dict, List, TypedDict
 
 import torch
 from jaxtyping import Float
 
-from cutamp.utils.common import Particles, action_6dof_to_mat4x4, action_4dof_to_mat4x4
 from cutamp.config import TAMPConfiguration
-from cutamp.tamp_domain import MoveFree, MoveHolding, Pick, Place, Push, PushStick, Conf
+from cutamp.tamp_domain import Conf, MoveFree, MoveHolding, Pick, Place, Push, PushStick
 from cutamp.tamp_world import (
     TAMPWorld,
 )
 from cutamp.task_planning import PlanSkeleton
+from cutamp.utils.common import Particles, action_4dof_to_mat4x4, action_6dof_to_mat4x4
 
 
 def get_conf_parameters(plan_skeleton: PlanSkeleton, ignore_initial: bool) -> List[str]:
@@ -159,8 +159,11 @@ class RolloutFunction:
                 obj_name, grasp_name, place_name, _, _ = ground_op.values
 
                 # Place is desired object pose in world frame
-                place_4dof = particles[place_name]
-                world_from_obj = action_4dof_to_mat4x4(place_4dof)
+                place_action = particles[place_name]
+                if place_action.shape[-1] == 6:
+                    world_from_obj = action_6dof_to_mat4x4(place_action)
+                else:
+                    world_from_obj = action_4dof_to_mat4x4(place_action)
 
                 # Apply the grasp offset to get the tool frame pose
                 obj_from_grasp = get_grasp_mat4x4(grasp_name)
@@ -183,7 +186,6 @@ class RolloutFunction:
 
             # Detect
             elif op_name == "Detect":
-
                 # [obj, pose, q]
                 obj_name, pose_name, _ = ground_op.values
 
@@ -192,19 +194,16 @@ class RolloutFunction:
                 # 7D pose to 4x4 Transformation Matrix
                 from curobo.types.math import Pose
 
-                world_from_detect = Pose(
-                    position=detect_pose_7d[:, :3], 
-                    quaternion=detect_pose_7d[:, 3:]
-                ).get_matrix()
+                world_from_detect = Pose(position=detect_pose_7d[:, :3], quaternion=detect_pose_7d[:, 3:]).get_matrix()
 
                 world_from_tool_desired.append(world_from_detect)
-                
+
                 # Don't close gripper during Detect Action
-                gripper_close.append(False) 
-                
+                gripper_close.append(False)
+
                 action_params.append(pose_name)
                 action_to_ts[pose_name] = ts
-                
+
                 # pose_ts not incremented because Detect doesn't move any objects
                 action_to_pose_ts[pose_name] = pose_ts
 

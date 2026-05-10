@@ -370,6 +370,11 @@ def yield_optimistic_skeletons(
                 if surface_name == "table":
                     effort_distance += 500.0
                     cost_breakdown.append(f"  + Place({target_obj} on table) PENALTY: 500.000m")
+                elif surface_name != "discard_zone":
+                    effort_distance += 500.0
+                    cost_breakdown.append(
+                        f"  + Place({target_obj} on {surface_name}) PENALTY: 500.000m (Must use discard_zone)"
+                    )
                 else:
                     best_xyz, dist, best_place_pose = sample_optimistic_placements(
                         target_obj, surface_name, current_ee_xyz, world
@@ -521,6 +526,32 @@ def sample_plan_skeleton(
     with timer.time("measure_heuristic"), torch.no_grad():
         rollout = rollout_fn(plan_particles)
         cost_dict = cost_fn(rollout)
+        print(f"\n[COST TRACKER] Analyzing {config.num_particles} particles for: {' -> '.join(plan_str)}")
+
+        found_explosions = False
+        # cost_dict usually has keys like ('Pick(obj_1)', 'collision_world')
+        for key, val in cost_dict.items():
+            # Handle nested dictionaries or direct tensor mapping
+            if isinstance(val, dict):
+                for sub_key, sub_val in val.items():
+                    if isinstance(sub_val, torch.Tensor):
+                        max_val = sub_val.max().item()
+                        min_val = sub_val.min().item()
+                        if min_val > 1.0:  # If even the BEST particle has a high cost, we have a geometry problem
+                            print(
+                                f"  [!] EXPLOSION in {key} -> {sub_key} | Min Cost: {min_val:.3f} | Max: {max_val:.3f}"
+                            )
+                            found_explosions = True
+            elif isinstance(val, torch.Tensor):
+                max_val = val.max().item()
+                min_val = val.min().item()
+                if min_val > 1.0:
+                    print(f"  [!] EXPLOSION in {key} | Min Cost: {min_val:.3f} | Max Cost: {max_val:.3f}")
+                    found_explosions = True
+
+        if not found_explosions:
+            print("  [✓] All actions look mathematically safe! (Min costs < 1.0)")
+        print("=====================================================================\n")
         heuristic = heuristic_fn(plan_skeleton, cost_dict, constraint_checker)
 
     # Number of satisfying particles
@@ -750,8 +781,8 @@ def run_cutamp(
                 # ==================================================
                 # --- MANUAL SKELETON TOGGLE FOR DEBUGGING ---
                 # ==================================================
-                # TEST_DETECT_ONLY = True
-                # TEST_PICK_ONLY = True
+                # TEST_DETECT_ONLY = False
+                # TEST_PICK_ONLY = False
 
                 # truncated_skeleton = []
                 # for op in plan_gen:

@@ -170,6 +170,81 @@ def place_4dof_sampler(
     return place_4dof
 
 
+def place_6dof_sampler(num_samples: int, obj: Obstacle, obj_spheres: torch.Tensor, surface: Obstacle) -> torch.Tensor:
+    """
+    Sample 6-DOF placement poses that lay the object flat on its side,
+    allowing for perfect top-down placements after lateral grasps.
+    """
+    if not isinstance(surface, (Cuboid, Mesh)):
+        raise NotImplementedError(f"Only Cuboid or Mesh surfaces supported for now, not {type(surface)}")
+
+    # Determine surface AABB
+    if isinstance(surface, Cuboid):
+        aabb_xy = surface.tensor_args.to_device(
+            [[-surface.dims[0] / 2, -surface.dims[1] / 2], [surface.dims[0] / 2, surface.dims[1] / 2]]
+        )
+        surface_z = surface.dims[2] / 2
+    else:
+        # Fallback for meshes
+        aabb = approximate_goal_aabb(surface).to(obj.tensor_args.device)
+        aabb_xy = aabb[:, :2]
+        surface_z = aabb[1, 2]
+
+    # Sample XY safely within the discard zone
+    xy = torch.rand(num_samples, 2, device=obj.tensor_args.device)
+    xy = aabb_xy[0] + xy * (aabb_xy[1] - aabb_xy[0])
+
+    # Randomly select one of the 4 side faces to lay flat on the table
+    # 0: Right face down (Roll = 90 deg)
+    # 1: Left face down (Roll = -90 deg)
+    # 2: Front face down (Pitch = 90 deg)
+    # 3: Back face down (Pitch = -90 deg)
+
+    face_idxs = torch.randint(0, 4, (num_samples,), device=obj.tensor_args.device)
+
+    rpy = torch.zeros(num_samples, 3, device=obj.tensor_args.device)
+    z_offset = torch.zeros(num_samples, device=obj.tensor_args.device)
+
+    # Extract object dimensions to calculate the new resting height
+    obj_dims = obj.tensor_args.to_device(obj.dims)
+
+    # Tipped on X axis (Roll) -> New resting height is the X dimension
+    mask_x = (face_idxs == 0) | (face_idxs == 1)
+    z_offset[mask_x] = obj_dims[0] / 2.0
+    rpy[face_idxs == 0, 0] = torch.pi / 2
+    rpy[face_idxs == 1, 0] = -torch.pi / 2
+
+    # Tipped on Y axis (Pitch) -> New resting height is the Y dimension
+    mask_y = (face_idxs == 2) | (face_idxs == 3)
+    z_offset[mask_y] = obj_dims[1] / 2.0
+    rpy[face_idxs == 2, 1] = torch.pi / 2
+    rpy[face_idxs == 3, 1] = -torch.pi / 2
+
+    # Allow random Yaw so the object can be rotated freely on the table surface
+    rpy[:, 2] = torch.empty(num_samples, device=obj.tensor_args.device).uniform_(-torch.pi, torch.pi)
+
+    # Calculate final Z with a tiny drop buffer
+    z_lower, z_upper = 1e-3, 1e-2
+    z_noise = torch.rand(num_samples, device=obj.tensor_args.device)
+    z_noise = z_lower + (z_upper - z_lower) * z_noise
+
+    z = z_offset + surface_z + z_noise
+    xyz = torch.cat([xy, z.unsqueeze(1)], dim=1)
+
+    # Transform to surface coordinate frame
+    if isinstance(surface, Cuboid):
+        from cutamp.utils.common import pose_list_to_mat4x4, transform_points
+
+        surface_mat4x4 = pose_list_to_mat4x4(surface.pose).to(obj.tensor_args.device)
+        xyz_surface = transform_points(xyz, surface_mat4x4)
+    else:
+        xyz_surface = xyz
+
+    # Concatenate XYZ with RPY to form a true 6-DOF placement tensor
+    place_6dof = torch.cat([xyz_surface, rpy], dim=1)
+    return place_6dof
+
+
 # def grasp_6dof_sampler(num_samples: int, obj: Obstacle, num_faces: Optional[int] = None) -> Grasp6DOF:
 #     """
 #     Sample 6-DOF grasps for the given object in the object's coordinate frame.
