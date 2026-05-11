@@ -65,7 +65,7 @@ def solve_curobo(
     last_q_name = "q0"
 
     # Top-Down Hover Distance (20cm directly above objects in World Space)
-    hover_z_distance = 0.25
+    hover_z_distance = 0.20
 
     # Accumulated plans that the real robot can actually execute
     last_op_type = None
@@ -175,150 +175,303 @@ def solve_curobo(
             obj, grasp, q = ground_op.values
             assert last_js is not None
 
-            with timer.time("curobo_planning"):
-                start_js = last_js
+            # Peek at the target pose 
+            _probe_q = best_particle[q].clone()
+            _probe_js = JointState.from_position(_probe_q[None])
+            _probe_mat = world.kin_model.get_state(_probe_js.position).ee_pose.get_matrix()[0]
+            is_target_top_down = _probe_mat[2, 2] < -0.5
 
-                target_q = best_particle[q].clone()
-                target_js = JointState.from_position(target_q[None])
+            if is_target_top_down:
+                # TABLETOP SCENE 
+                with timer.time("curobo_planning"):
+                    start_js = last_js
 
-                # Get target pose to determine approach direction
-                world_from_ee_deep = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
+                    target_q = best_particle[q].clone()
+                    target_js = JointState.from_position(target_q[None])
 
-                # Pull back 20cm along the Tool's Local Z-Axis (slides up for tables and back for shelves)
-                local_shift_hover = torch.eye(4, dtype=torch.float32, device=world.device)
-                local_shift_hover[2, 3] = -hover_z_distance
-                world_from_hover = world_from_ee_deep @ local_shift_hover
+                    # Calculate strictly top-down approach pose 
+                    world_from_ee = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
+                    world_from_hover = world_from_ee.clone()
+                    world_from_hover[2, 3] += hover_z_distance
 
-                # Plan Neutral Retract (Untwisting the wrist before transit)
-                world_from_ee_start = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
-                is_start_top_down = world_from_ee_start[2, 2] < -0.5
+                    # Plan Neutral Retract (Untwisting the wrist before transit)
+                    world_from_ee_start = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
 
-                if is_start_top_down:
+                    # Create a waypoint 20cm straight up from the current position
                     world_from_start_retract = world_from_ee_start.clone()
                     world_from_start_retract[2, 3] += hover_z_distance
 
-                    # FORCE WRIST TO NEUTRAL
                     neutral_rot = torch.tensor(
                         [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], dtype=torch.float32, device=world.device
                     )
                     world_from_start_retract[:3, :3] = neutral_rot
-                else:
-                    # LATERAL RETRACT: Pull straight back along the tool's local Z axis
-                    world_from_start_retract = world_from_ee_start @ local_shift_hover
 
-                retract_result = motion_gen.plan_single(
-                    start_js, Pose.from_matrix(world_from_start_retract), plan_config
-                )
-
-                if retract_result.success:
-                    retract_js = JointState.from_position(retract_result.get_interpolated_plan().position[-1:])
-                else:
-                    print("WARNING: Could not untwist wrist. Falling back to start state.")
-                    retract_result = None
-                    retract_js = start_js
-
-                # Plan Global Transit (across the workspace to the Local Hover pose)
-                approach_result = motion_gen.plan_single(retract_js, Pose.from_matrix(world_from_hover), plan_config)
-                if not approach_result.success:
-                    raise RuntimeError(
-                        f"Failed to plan approach for {ground_op.name}. Status: {approach_result.status}"
+                    retract_result = motion_gen.plan_single(
+                        start_js, Pose.from_matrix(world_from_start_retract), plan_config
                     )
 
-                # Plan Final Descent (Straight into the PyTorch grasp)
-                approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
+                    if retract_result.success:
+                        retract_js = JointState.from_position(retract_result.get_interpolated_plan().position[-1:])
+                    else:
+                        print("WARNING: Could not untwist wrist. Falling back to start state.")
+                        retract_result = None
+                        retract_js = start_js
 
-                # Ghost the object so cuRobo doesn't panic during the descent
-                motion_gen.world_coll_checker.enable_obstacle(enable=False, name=obj)
+                    # Plan Global Transit 
+                    approach_result = motion_gen.plan_single(
+                        retract_js, Pose.from_matrix(world_from_hover), plan_config
+                    )
+                    if not approach_result.success:
+                        raise RuntimeError(
+                            f"Failed to plan approach for {ground_op.name}. Status: {approach_result.status}"
+                        )
 
-                # Grasp Stopping Offset
-                world_from_ee = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
-                is_top_down = world_from_ee[2, 2] < -0.5
+                    # Plan Final Descent (Straight down)
+                    approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
 
-                if is_top_down:
+                    # Ghost the object so cuRobo doesn't panic during the descent
+                    motion_gen.world_coll_checker.enable_obstacle(enable=False, name=obj)
+
+                    world_from_ee_deep = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
+
                     stopping_distance = 0.035
-                else:
-                    stopping_distance = 0.0
 
-                local_shift_stop = torch.eye(4, dtype=torch.float32, device=world.device)
-                local_shift_stop[2, 3] = -stopping_distance
+                    # Shift along Z axis(only configured for top-down grasps not lateral grasps)
+                    local_shift = torch.eye(4, dtype=torch.float32, device=world.device)
+                    local_shift[2, 3] = -stopping_distance
 
-                shallow_stop_pose = world_from_ee_deep @ local_shift_stop
+                    shallow_stop_pose = world_from_ee_deep @ local_shift
 
-                end_result = motion_gen.plan_single(approach_js, Pose.from_matrix(shallow_stop_pose), plan_config)
+                    end_result = motion_gen.plan_single(approach_js, Pose.from_matrix(shallow_stop_pose), plan_config)
 
-                if not end_result.success:
-                    motion_gen.world_coll_checker.enable_obstacle(enable=True, name=obj)
-                    raise RuntimeError(
-                        f"Failed to plan final grasp insertion for {ground_op.name}. Status: {end_result.status}"
+                    if not end_result.success:
+                        motion_gen.world_coll_checker.enable_obstacle(enable=True, name=obj)
+                        raise RuntimeError(
+                            f"Failed to plan final grasp insertion for {ground_op.name}. Status: {end_result.status}"
+                        )
+
+                for result in [retract_result, approach_result, end_result]:
+                    if result is None:
+                        continue
+                    dt = result.interpolation_dt
+                    plan = result.get_interpolated_plan()
+                    accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
+                    last_js = JointState.from_position(plan[-1:].position)
+                    ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+
+                # Temporarily monkey patch get_bounding_spheres to return the spheres we sampled
+                obstacle = motion_gen.world_model.get_obstacle(obj)
+                obstacle.old_get_bounding_spheres = obstacle.get_bounding_spheres
+
+                def get_bounding_spheres(self, *args, **kwargs) -> List[Sphere]:
+                    spheres = world.get_collision_spheres(obj)
+                    pts = spheres[:, :3].cpu().numpy()
+                    n_radius = spheres[:, 3].cpu().numpy()
+                    obj_pose = Pose.from_list(self.pose, self.tensor_args)
+                    pre_transform_pose = kwargs["pre_transform_pose"]
+                    if pre_transform_pose is not None:
+                        obj_pose = pre_transform_pose.multiply(obj_pose)
+                    points_cuda = self.tensor_args.to_device(pts)
+                    pts = obj_pose.transform_points(points_cuda).cpu().view(-1, 3).numpy()
+
+                    return [
+                        Sphere(
+                            name=f"{self.name}_sph_{i}",
+                            pose=[pts[i, 0], pts[i, 1], pts[i, 2], 1, 0, 0, 0],
+                            radius=n_radius[i],
+                        )
+                        for i in range(pts.shape[0])
+                    ]
+
+                obstacle.get_bounding_spheres = get_bounding_spheres.__get__(obstacle)
+
+                # Attach the object to the robot
+                with timer.time("curobo_planning"):
+                    motion_gen.attach_objects_to_robot(
+                        last_js,
+                        object_names=[obj],
+                        surface_sphere_radius=0.005,
+                        sphere_fit_type=SphereFitType.VOXEL_VOLUME_SAMPLE_SURFACE,
+                        voxelize_method="subdivide",
                     )
 
-            for result in [retract_result, approach_result, end_result]:
-                if result is None:
-                    continue
-                dt = result.interpolation_dt
-                plan = result.get_interpolated_plan()
+                obstacle.get_bounding_spheres = obstacle.old_get_bounding_spheres
+                del obstacle.old_get_bounding_spheres
+
+                # Close the gripper
+                if config.robot == "ur5":
+                    interp = torch.linspace(0.0, 0.4, 20)[:, None]
+                else:
+                    interp = torch.linspace(0.04, 0.02, 20)[:, None].repeat(1, 2)
+
+                accum_plans.append({"type": "gripper", "action": "close"})
+                all_pos = torch.cat([last_js.position.expand(interp.shape[0], -1).cpu(), interp], dim=1)
+                ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=0.02)
+
+                # Plan Lift(Pull object 20cm straight up out of the clutter)
+                lift_result = motion_gen.plan_single(last_js, Pose.from_matrix(world_from_hover), plan_config)
+                if not lift_result.success:
+                    raise RuntimeError(
+                        f"Failed to plan lift after grasping {ground_op.name}. Status: {lift_result.status}"
+                    )
+
+                dt = lift_result.interpolation_dt
+                plan = lift_result.get_interpolated_plan()
                 accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
                 last_js = JointState.from_position(plan[-1:].position)
                 ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+                last_op_type = "Pick"
 
-            obstacle = motion_gen.world_model.get_obstacle(obj)
-            obstacle.old_get_bounding_spheres = obstacle.get_bounding_spheres
-
-            def get_bounding_spheres(self, *args, **kwargs) -> List[Sphere]:
-                spheres = world.get_collision_spheres(obj)
-                pts = spheres[:, :3].cpu().numpy()
-                n_radius = spheres[:, 3].cpu().numpy()
-                obj_pose = Pose.from_list(self.pose, self.tensor_args)
-                pre_transform_pose = kwargs["pre_transform_pose"]
-                if pre_transform_pose is not None:
-                    obj_pose = pre_transform_pose.multiply(obj_pose)
-                points_cuda = self.tensor_args.to_device(pts)
-                pts = obj_pose.transform_points(points_cuda).cpu().view(-1, 3).numpy()
-
-                return [
-                    Sphere(
-                        name=f"{self.name}_sph_{i}",
-                        pose=[pts[i, 0], pts[i, 1], pts[i, 2], 1, 0, 0, 0],
-                        radius=n_radius[i],
-                    )
-                    for i in range(pts.shape[0])
-                ]
-
-            obstacle.get_bounding_spheres = get_bounding_spheres.__get__(obstacle)
-
-            with timer.time("curobo_planning"):
-                motion_gen.attach_objects_to_robot(
-                    last_js,
-                    object_names=[obj],
-                    surface_sphere_radius=0.005,
-                    sphere_fit_type=SphereFitType.VOXEL_VOLUME_SAMPLE_SURFACE,
-                    voxelize_method="subdivide",
-                )
-
-            obstacle.get_bounding_spheres = obstacle.old_get_bounding_spheres
-            del obstacle.old_get_bounding_spheres
-
-            # Close the gripper
-            if config.robot == "ur5":
-                interp = torch.linspace(0.0, 0.4, 20)[:, None]
             else:
-                interp = torch.linspace(0.04, 0.02, 20)[:, None].repeat(1, 2)
+                # SHELF SCENE (LATERAL GRASP + RETURN HOME)
+                with timer.time("curobo_planning"):
+                    start_js = last_js
+                    target_q = best_particle[q].clone()
+                    target_js = JointState.from_position(target_q[None])
 
-            accum_plans.append({"type": "gripper", "action": "close"})
-            all_pos = torch.cat([last_js.position.expand(interp.shape[0], -1).cpu(), interp], dim=1)
-            ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=0.02)
+                    world_from_ee_deep = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
 
-            # Plan Lift (Extract out of the clutter using the perfectly aligned hover pose)
-            lift_result = motion_gen.plan_single(last_js, Pose.from_matrix(world_from_hover), plan_config)
-            if not lift_result.success:
-                raise RuntimeError(f"Failed to plan lift after grasping {ground_op.name}. Status: {lift_result.status}")
+                    # PRE-PICK APPROACH POSITIONING (15cm straight back along local Z)
+                    local_shift_hover = torch.eye(4, dtype=torch.float32, device=world.device)
+                    local_shift_hover[2, 3] = -0.15
+                    world_from_hover = world_from_ee_deep @ local_shift_hover
 
-            dt = lift_result.interpolation_dt
-            plan = lift_result.get_interpolated_plan()
-            accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
-            last_js = JointState.from_position(plan[-1:].position)
-            ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
-            last_op_type = "Pick"
+                    # Plan Lateral Retract from current position
+                    world_from_ee_start = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
+                    world_from_start_retract = world_from_ee_start @ local_shift_hover
+
+                    retract_result = motion_gen.plan_single(
+                        start_js, Pose.from_matrix(world_from_start_retract), plan_config
+                    )
+
+                    if retract_result.success:
+                        retract_js = JointState.from_position(retract_result.get_interpolated_plan().position[-1:])
+                    else:
+                        retract_result = None
+                        retract_js = start_js
+
+                    # TRANSIT TO HOVER POSE
+                    approach_result = motion_gen.plan_single(
+                        retract_js, Pose.from_matrix(world_from_hover), plan_config
+                    )
+                    approach_js = None
+                    end_result = None
+
+                    if approach_result.success:
+                        approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
+                    else:
+                        print("   [!] Cartesian Pick Approach Failed. Attempting Joint Space Fallback...")
+                        motion_gen.world_coll_checker.enable_obstacle(enable=False, name=obj)
+                        approach_result = motion_gen.plan_single_js(retract_js, target_js, plan_config)
+                        if not approach_result.success:
+                            motion_gen.world_coll_checker.enable_obstacle(enable=True, name=obj)
+                            raise RuntimeError(f"Failed to plan approach for {ground_op.name}")
+
+                        approach_js = target_js
+
+                    # FINAL INSERTION
+                    if end_result is None and approach_js is not target_js:
+                        motion_gen.world_coll_checker.enable_obstacle(enable=False, name=obj)
+
+                        stopping_distance = 0.0
+                        local_shift_stop = torch.eye(4, dtype=torch.float32, device=world.device)
+                        local_shift_stop[2, 3] = -stopping_distance
+
+                        shallow_stop_pose = world_from_ee_deep @ local_shift_stop
+
+                        end_result = motion_gen.plan_single(
+                            approach_js, Pose.from_matrix(shallow_stop_pose), plan_config
+                        )
+
+                        if not end_result.success:
+                            print("   [!] Cartesian Insertion Failed. Falling back to Joint-Space insertion.")
+                            end_result = motion_gen.plan_single_js(approach_js, target_js, plan_config)
+                            if not end_result.success:
+                                motion_gen.world_coll_checker.enable_obstacle(enable=True, name=obj)
+                                raise RuntimeError("Failed to plan grasp insertion")
+
+                for result in [retract_result, approach_result, end_result]:
+                    if result is None:
+                        continue
+                    dt = result.interpolation_dt
+                    plan = result.get_interpolated_plan()
+                    accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
+                    last_js = JointState.from_position(plan[-1:].position)
+                    ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+
+                obstacle = motion_gen.world_model.get_obstacle(obj)
+                obstacle.old_get_bounding_spheres = obstacle.get_bounding_spheres
+
+                def get_bounding_spheres(self, *args, **kwargs) -> List[Sphere]:
+                    spheres = world.get_collision_spheres(obj)
+                    pts = spheres[:, :3].cpu().numpy()
+                    n_radius = spheres[:, 3].cpu().numpy()
+                    obj_pose = Pose.from_list(self.pose, self.tensor_args)
+                    pre_transform_pose = kwargs["pre_transform_pose"]
+                    if pre_transform_pose is not None:
+                        obj_pose = pre_transform_pose.multiply(obj_pose)
+                    points_cuda = self.tensor_args.to_device(pts)
+                    pts = obj_pose.transform_points(points_cuda).cpu().view(-1, 3).numpy()
+
+                    return [
+                        Sphere(
+                            name=f"{self.name}_sph_{i}",
+                            pose=[pts[i, 0], pts[i, 1], pts[i, 2], 1, 0, 0, 0],
+                            radius=n_radius[i],
+                        )
+                        for i in range(pts.shape[0])
+                    ]
+
+                obstacle.get_bounding_spheres = get_bounding_spheres.__get__(obstacle)
+
+                with timer.time("curobo_planning"):
+                    motion_gen.attach_objects_to_robot(
+                        last_js,
+                        object_names=[obj],
+                        surface_sphere_radius=0.005,
+                        sphere_fit_type=SphereFitType.VOXEL_VOLUME_SAMPLE_SURFACE,
+                        voxelize_method="subdivide",
+                    )
+
+                obstacle.get_bounding_spheres = obstacle.old_get_bounding_spheres
+                del obstacle.old_get_bounding_spheres
+
+                # Close the gripper
+                if config.robot == "ur5":
+                    interp = torch.linspace(0.0, 0.4, 20)[:, None]
+                else:
+                    interp = torch.linspace(0.04, 0.02, 20)[:, None].repeat(1, 2)
+
+                accum_plans.append({"type": "gripper", "action": "close"})
+                all_pos = torch.cat([last_js.position.expand(interp.shape[0], -1).cpu(), interp], dim=1)
+                ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=0.02)
+
+                # POST-PICK RETRACT (Pulling the object out)
+                lift_result = motion_gen.plan_single(last_js, Pose.from_matrix(world_from_hover), plan_config)
+                if not lift_result.success:
+                    print("   [!] WARNING: Cartesian Lift failed. Arm will attempt to go home directly.")
+                else:
+                    dt = lift_result.interpolation_dt
+                    plan = lift_result.get_interpolated_plan()
+                    accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
+                    last_js = JointState.from_position(plan[-1:].position)
+                    ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+
+                # SHELF ESCAPE TO HOME
+                print("   [Pick] Shelf Scene: Retracting safely to Home Position (q0) with object.")
+                home_js = JointState.from_position(best_particle["q0"][None].clone())
+
+                go_home = motion_gen.plan_single_js(last_js, home_js, plan_config)
+                if go_home.success:
+                    dt = go_home.interpolation_dt
+                    plan = go_home.get_interpolated_plan()
+                    accum_plans.append({"type": "trajectory", "plan": plan, "dt": dt})
+                    last_js = JointState.from_position(plan[-1:].position)
+                    ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+                else:
+                    print("   [!] WARNING: Could not plan path home after Pick.")
+
+                last_op_type = "Pick"
 
         # Place
         elif op_name == Place.name:
@@ -513,12 +666,22 @@ def solve_curobo(
 
     start_js = last_js
 
-    # Plan to go home at the end
+    # SAFE HOME RETRACTION
     world_from_ee = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
-    world_from_retract = world_from_ee.clone()
-    world_from_retract[2, 3] += hover_z_distance
+    is_ending_top_down = world_from_ee[2, 2] < -0.5
+
+    if is_ending_top_down:
+        # Tabletop Scene (Untouched): Go straight up 25cm in World Z
+        world_from_retract = world_from_ee.clone()
+        world_from_retract[2, 3] += hover_z_distance
+    else:
+        # Shelf Scene: Pull straight back (Local -Z) instead of shooting up!
+        local_shift_hover = torch.eye(4, dtype=torch.float32, device=world.device)
+        local_shift_hover[2, 3] = -0.15
+        world_from_retract = world_from_ee @ local_shift_hover
 
     retract_result = motion_gen.plan_single(start_js, Pose.from_matrix(world_from_retract), plan_config)
+
     if retract_result.success:
         dt = retract_result.interpolation_dt
         plan = retract_result.get_interpolated_plan()
@@ -533,8 +696,9 @@ def solve_curobo(
 
     with timer.time("curobo_planning"):
         result = motion_gen.plan_single_js(js_last, js_home, plan_config)
+
     if not result.success:
-        print("WARNING: Failed to plan for going home, but returning successful Pick plan!")
+        print("WARNING: Failed to plan for going home, but returning successful plan!")
 
     if result.success:
         dt = result.interpolation_dt

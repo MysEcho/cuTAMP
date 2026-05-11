@@ -95,8 +95,8 @@ def grasp_6dof_sampler(num_samples: int, obj: Obstacle, num_faces: Optional[int]
     """
     assert isinstance(obj, Cuboid), "only Cuboid objects supported for 6-dof grasps right now"
 
-    # Keep fingers perfectly square (horizontal or vertical)
-    roll_choices = torch.tensor([0.0, torch.pi / 2, torch.pi, -torch.pi / 2], device=obj.tensor_args.device)
+    # Keep fingers perfectly square (horizontal or 60 degrees)
+    roll_choices = torch.tensor([0.0, torch.pi / 3, torch.pi, -torch.pi / 3], device=obj.tensor_args.device)
     roll_idxs = torch.randint(0, 4, (num_samples,), device=obj.tensor_args.device)
     roll = roll_choices[roll_idxs]
 
@@ -105,7 +105,7 @@ def grasp_6dof_sampler(num_samples: int, obj: Obstacle, num_faces: Optional[int]
 
     # Because the object is rotated (yaw=1.5), the optimizer must be allowed
     # to naturally rotate the hand so the arm points out the front of the shelf.
-    yaw = torch.empty(num_samples, device=obj.tensor_args.device).uniform_(-torch.pi, torch.pi)
+    yaw = torch.empty(num_samples, device=obj.tensor_args.device).uniform_(-torch.pi / 3, torch.pi / 3)
 
     rpy = torch.stack([roll, pitch, yaw], dim=1)
 
