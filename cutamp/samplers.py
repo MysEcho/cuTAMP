@@ -91,10 +91,11 @@ def grasp_4dof_sampler(
 def grasp_6dof_sampler(num_samples: int, obj: Obstacle, num_faces: Optional[int] = None) -> torch.Tensor:
     """
     Sample 6-DOF grasps for the given object in the object's coordinate frame.
-    The horizontal component of the grasp is governed by the Yaw not the Roll. (OMG this took me so much time to debug)
+    The horizontal component of the grasp is governed by the Yaw not the Roll.
     """
     assert isinstance(obj, Cuboid), "only Cuboid objects supported for 6-dof grasps right now"
 
+    # Roll dictates vertical fingers
     roll_choices = torch.tensor(
         [-torch.pi / 2, torch.pi / 2],
         device=obj.tensor_args.device,
@@ -104,6 +105,7 @@ def grasp_6dof_sampler(num_samples: int, obj: Obstacle, num_faces: Optional[int]
 
     pitch = torch.zeros(num_samples, device=obj.tensor_args.device)
 
+    # Yaw dictates the horizontal side approach
     yaw_choices = torch.tensor([-torch.pi / 2, torch.pi / 2], device=obj.tensor_args.device)
     yaw_idxs = torch.randint(0, 2, (num_samples,), device=obj.tensor_args.device)
     yaw = yaw_choices[yaw_idxs]
@@ -113,7 +115,12 @@ def grasp_6dof_sampler(num_samples: int, obj: Obstacle, num_faces: Optional[int]
     half_extents = obj.tensor_args.to_device([dim / 2 for dim in obj.dims])
     gripper_offset = 0.015
     upper = (half_extents - gripper_offset).clamp(min=0.0)
-    lower = -upper
+
+    # Create the lower bound as the exact negative of the upper bound
+    lower = -upper.clone()
+
+    # Sample above the half height of the object
+    # lower[2] = 0.05
 
     translation = torch.rand(num_samples, 3, device=obj.tensor_args.device)
     translation = lower + (upper - lower) * translation
