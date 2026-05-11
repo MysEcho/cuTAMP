@@ -38,6 +38,7 @@ def solve_curobo(
     timer: TorchTimer,
     visualizer: Visualizer,
     timeline: str = "curobo",
+    is_shelf_scene: bool = True,
 ):
     """
     Solve for full motion plan given a plan skeleton and optimized particles.
@@ -179,9 +180,10 @@ def solve_curobo(
             _probe_q = best_particle[q].clone()
             _probe_js = JointState.from_position(_probe_q[None])
             _probe_mat = world.kin_model.get_state(_probe_js.position).ee_pose.get_matrix()[0]
-            is_target_top_down = _probe_mat[2, 2] < -0.5
+            is_target_top_down = False if is_shelf_scene else True
 
             if is_target_top_down:
+                print("Executing Tabletop Scene.")
                 # TABLETOP SCENE
                 with timer.time("curobo_planning"):
                     start_js = last_js
@@ -323,6 +325,7 @@ def solve_curobo(
                 last_op_type = "Pick"
 
             else:
+                print("Executing Shelf Scene.")
                 # SHELF SCENE (CARTESIAN SLIDE-IN / SLIDE-OUT)
                 with timer.time("curobo_planning"):
                     start_js = last_js

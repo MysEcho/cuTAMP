@@ -725,6 +725,7 @@ def run_cutamp(
     experiment_id: Optional[str] = None,
     verbose: bool = False,
     num_plan_skeletons: int = 30,
+    is_shelf_scene: bool = True,
 ):
     """Overall cuTAMP algorithm implementation."""
 
@@ -1018,6 +1019,7 @@ def run_cutamp(
                     config,
                     timer,
                     visualizer,
+                    is_shelf_scene,
                 )
             overall_metrics["num_satisfying_final"] = metrics["num_satisfying_final"]
             overall_metrics["final_plan_skeleton"] = [str(op) for op in plan_skeleton]
