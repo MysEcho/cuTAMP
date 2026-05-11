@@ -91,25 +91,25 @@ def grasp_4dof_sampler(
 def grasp_6dof_sampler(num_samples: int, obj: Obstacle, num_faces: Optional[int] = None) -> torch.Tensor:
     """
     Sample 6-DOF grasps for the given object in the object's coordinate frame.
-    Roll is discrete, Pitch is 0 (horizontal), Yaw is continuous.
+    The horizontal component of the grasp is governed by the Yaw not the Roll. (OMG this took me so much time to debug)
     """
     assert isinstance(obj, Cuboid), "only Cuboid objects supported for 6-dof grasps right now"
 
-    # Keep fingers perfectly square (horizontal or 60 degrees)
-    roll_choices = torch.tensor([0.0, torch.pi / 3, torch.pi, -torch.pi / 3], device=obj.tensor_args.device)
-    roll_idxs = torch.randint(0, 4, (num_samples,), device=obj.tensor_args.device)
+    roll_choices = torch.tensor(
+        [-torch.pi / 2, torch.pi / 2],
+        device=obj.tensor_args.device,
+    )
+    roll_idxs = torch.randint(0, 2, (num_samples,), device=obj.tensor_args.device)
     roll = roll_choices[roll_idxs]
 
-    # Must be exactly 0.0 to keep the arm perfectly horizontal/level with the shelf.
     pitch = torch.zeros(num_samples, device=obj.tensor_args.device)
 
-    # Because the object is rotated (yaw=1.5), the optimizer must be allowed
-    # to naturally rotate the hand so the arm points out the front of the shelf.
-    yaw = torch.empty(num_samples, device=obj.tensor_args.device).uniform_(-torch.pi / 3, torch.pi / 3)
+    yaw_choices = torch.tensor([-torch.pi / 2, torch.pi / 2], device=obj.tensor_args.device)
+    yaw_idxs = torch.randint(0, 2, (num_samples,), device=obj.tensor_args.device)
+    yaw = yaw_choices[yaw_idxs]
 
     rpy = torch.stack([roll, pitch, yaw], dim=1)
 
-    # UNCLAMPED TRANSLATION
     half_extents = obj.tensor_args.to_device([dim / 2 for dim in obj.dims])
     gripper_offset = 0.015
     upper = (half_extents - gripper_offset).clamp(min=0.0)
@@ -174,6 +174,7 @@ def place_6dof_sampler(num_samples: int, obj: Obstacle, obj_spheres: torch.Tenso
     """
     Sample 6-DOF placement poses that lay the object flat on its side,
     allowing for perfect top-down placements after lateral grasps.
+
     """
     if not isinstance(surface, (Cuboid, Mesh)):
         raise NotImplementedError(f"Only Cuboid or Mesh surfaces supported for now, not {type(surface)}")
