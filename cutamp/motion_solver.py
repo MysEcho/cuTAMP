@@ -436,7 +436,7 @@ def solve_curobo(
                 # Safe Hover for tabletop scene
                 SAFE_Z_ALTITUDE = 0.45
                 # Safe Hover for shelf scene
-                SAFE_X_DIST = 0.25
+                SAFE_X_DIST = -0.10
 
                 # RETRACT: Go straight up from current position
                 world_from_ee_start = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
