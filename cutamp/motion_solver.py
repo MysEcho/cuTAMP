@@ -175,21 +175,21 @@ def solve_curobo(
             obj, grasp, q = ground_op.values
             assert last_js is not None
 
-            # Peek at the target pose 
+            # Peek at the target pose
             _probe_q = best_particle[q].clone()
             _probe_js = JointState.from_position(_probe_q[None])
             _probe_mat = world.kin_model.get_state(_probe_js.position).ee_pose.get_matrix()[0]
             is_target_top_down = _probe_mat[2, 2] < -0.5
 
             if is_target_top_down:
-                # TABLETOP SCENE 
+                # TABLETOP SCENE
                 with timer.time("curobo_planning"):
                     start_js = last_js
 
                     target_q = best_particle[q].clone()
                     target_js = JointState.from_position(target_q[None])
 
-                    # Calculate strictly top-down approach pose 
+                    # Calculate strictly top-down approach pose
                     world_from_ee = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
                     world_from_hover = world_from_ee.clone()
                     world_from_hover[2, 3] += hover_z_distance
@@ -217,7 +217,7 @@ def solve_curobo(
                         retract_result = None
                         retract_js = start_js
 
-                    # Plan Global Transit 
+                    # Plan Global Transit
                     approach_result = motion_gen.plan_single(
                         retract_js, Pose.from_matrix(world_from_hover), plan_config
                     )
@@ -323,7 +323,7 @@ def solve_curobo(
                 last_op_type = "Pick"
 
             else:
-                # SHELF SCENE (LATERAL GRASP + RETURN HOME)
+                # SHELF SCENE (CARTESIAN SLIDE-IN / SLIDE-OUT)
                 with timer.time("curobo_planning"):
                     start_js = last_js
                     target_q = best_particle[q].clone()
@@ -331,14 +331,41 @@ def solve_curobo(
 
                     world_from_ee_deep = world.kin_model.get_state(target_js.position).ee_pose.get_matrix()[0]
 
-                    # PRE-PICK APPROACH POSITIONING (15cm straight back along local Z)
-                    local_shift_hover = torch.eye(4, dtype=torch.float32, device=world.device)
-                    local_shift_hover[2, 3] = -0.15
-                    world_from_hover = world_from_ee_deep @ local_shift_hover
+                    # Extrapolate trajectory outside the shelf
+                    def get_shelf_hover_pose(target_grasp_mat, pull_back_dist=0.22):
+                        """
+                        Calculates a pose aligned with the grasp, but forces the
+                        extraction to happen purely on a flat, horizontal plane.
+                        """
+                        hover_mat = target_grasp_mat.clone()
 
-                    # Plan Lateral Retract from current position
+                        # Get the gripper's approach vector in World Space (Z-column of rotation matrix)
+                        approach_vector = hover_mat[:3, 2].clone()
+
+                        # CRITICAL: Kill the vertical (Z) component.
+                        # This forces the extraction to be perfectly flat/lateral!
+                        approach_vector[2] = 0.0
+
+                        # Normalize the flattened vector
+                        if torch.norm(approach_vector) > 1e-6:
+                            approach_vector = approach_vector / torch.norm(approach_vector)
+                        else:
+                            # Fallback if vector was perfectly vertical (shouldn't happen in shelf)
+                            approach_vector = torch.tensor(
+                                [1.0, 0.0, 0.0], dtype=torch.float32, device=target_grasp_mat.device
+                            )
+
+                        # Pull back exactly along this flat line
+                        hover_mat[:3, 3] -= approach_vector * pull_back_dist
+
+                        return hover_mat
+
+                    # Extract 22cm straight back to clear the shelf face safely
+                    world_from_hover = get_shelf_hover_pose(world_from_ee_deep, pull_back_dist=0.22)
+
+                    # Plan an initial untangling retract from current state
                     world_from_ee_start = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
-                    world_from_start_retract = world_from_ee_start @ local_shift_hover
+                    world_from_start_retract = get_shelf_hover_pose(world_from_ee_start, pull_back_dist=0.25)
 
                     retract_result = motion_gen.plan_single(
                         start_js, Pose.from_matrix(world_from_start_retract), plan_config
@@ -350,47 +377,59 @@ def solve_curobo(
                         retract_result = None
                         retract_js = start_js
 
-                    # TRANSIT TO HOVER POSE
+                    # Reach Hovering Pose & Configure Gripper
                     approach_result = motion_gen.plan_single(
                         retract_js, Pose.from_matrix(world_from_hover), plan_config
                     )
+
                     approach_js = None
-                    end_result = None
+                    insertion_result = None
 
                     if approach_result.success:
                         approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
                     else:
-                        print("   [!] Cartesian Pick Approach Failed. Attempting Joint Space Fallback...")
+                        print("   [!] Cartesian Approach to Hover Failed. Falling back to Joint-Space...")
                         motion_gen.world_coll_checker.enable_obstacle(enable=False, name=obj)
                         approach_result = motion_gen.plan_single_js(retract_js, target_js, plan_config)
                         if not approach_result.success:
                             motion_gen.world_coll_checker.enable_obstacle(enable=True, name=obj)
                             raise RuntimeError(f"Failed to plan approach for {ground_op.name}")
-
                         approach_js = target_js
 
-                    # FINAL INSERTION
-                    if end_result is None and approach_js is not target_js:
+                    # Slowly go inside the shelf on a perfect linear rail 
+                    if insertion_result is None and approach_js is not target_js:
                         motion_gen.world_coll_checker.enable_obstacle(enable=False, name=obj)
 
-                        stopping_distance = 0.0
-                        local_shift_stop = torch.eye(4, dtype=torch.float32, device=world.device)
-                        local_shift_stop[2, 3] = -stopping_distance
+                        
+                        # LOCK ORIENTATION
+                        insertion_pose = world_from_hover.clone()
 
-                        shallow_stop_pose = world_from_ee_deep @ local_shift_stop
+                        # Gripper forward direction in world frame
+                        forward = insertion_pose[:3, 2].clone()
 
-                        end_result = motion_gen.plan_single(
-                            approach_js, Pose.from_matrix(shallow_stop_pose), plan_config
+                        # Remove any vertical component
+                        forward[2] = 0.0
+                        forward = forward / torch.norm(forward)
+                       
+                        # Translate only along shelf depth direction
+                        insertion_distance = 0.22
+
+                        insertion_pose[:3, 3] += forward * insertion_distance
+
+                        # Preserve exact orientation from hover pose
+                        insertion_pose[:3, :3] = world_from_hover[:3, :3]
+
+                        # Cartesian rail insertion
+                        insertion_result = motion_gen.plan_single(
+                            approach_js, Pose.from_matrix(insertion_pose), plan_config
                         )
 
-                        if not end_result.success:
-                            print("   [!] Cartesian Insertion Failed. Falling back to Joint-Space insertion.")
-                            end_result = motion_gen.plan_single_js(approach_js, target_js, plan_config)
-                            if not end_result.success:
-                                motion_gen.world_coll_checker.enable_obstacle(enable=True, name=obj)
-                                raise RuntimeError("Failed to plan grasp insertion")
+                        if not insertion_result.success:
+                            print("   [!] Cartesian insertion failed.")
+                            motion_gen.world_coll_checker.enable_obstacle(enable=True, name=obj)
+                            raise RuntimeError("Failed shelf insertion")
 
-                for result in [retract_result, approach_result, end_result]:
+                for result in [retract_result, approach_result, insertion_result]:
                     if result is None:
                         continue
                     dt = result.interpolation_dt
@@ -446,10 +485,10 @@ def solve_curobo(
                 all_pos = torch.cat([last_js.position.expand(interp.shape[0], -1).cpu(), interp], dim=1)
                 ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=0.02)
 
-                # POST-PICK RETRACT (Pulling the object out)
+                # Slowly retract back to the exact same hovering pose
                 lift_result = motion_gen.plan_single(last_js, Pose.from_matrix(world_from_hover), plan_config)
                 if not lift_result.success:
-                    print("   [!] WARNING: Cartesian Lift failed. Arm will attempt to go home directly.")
+                    print("   [!] WARNING: Cartesian Slide-Out failed. Arm will attempt to go home directly.")
                 else:
                     dt = lift_result.interpolation_dt
                     plan = lift_result.get_interpolated_plan()
@@ -457,7 +496,7 @@ def solve_curobo(
                     last_js = JointState.from_position(plan[-1:].position)
                     ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
 
-                # SHELF ESCAPE TO HOME
+                # Proceed with the rest of the action (Escape to Home)
                 print("   [Pick] Shelf Scene: Retracting safely to Home Position (q0) with object.")
                 home_js = JointState.from_position(best_particle["q0"][None].clone())
 
