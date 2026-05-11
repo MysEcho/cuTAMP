@@ -286,14 +286,14 @@ def solve_curobo(
                 obstacle.get_bounding_spheres = get_bounding_spheres.__get__(obstacle)
 
                 # Attach the object to the robot
-                with timer.time("curobo_planning"):
-                    motion_gen.attach_objects_to_robot(
-                        last_js,
-                        object_names=[obj],
-                        surface_sphere_radius=0.005,
-                        sphere_fit_type=SphereFitType.VOXEL_VOLUME_SAMPLE_SURFACE,
-                        voxelize_method="subdivide",
-                    )
+                # with timer.time("curobo_planning"):
+                #     motion_gen.attach_objects_to_robot(
+                #         last_js,
+                #         object_names=[obj],
+                #         surface_sphere_radius=0.005,
+                #         sphere_fit_type=SphereFitType.VOXEL_VOLUME_SAMPLE_SURFACE,
+                #         voxelize_method="subdivide",
+                #     )
 
                 obstacle.get_bounding_spheres = obstacle.old_get_bounding_spheres
                 del obstacle.old_get_bounding_spheres
@@ -396,11 +396,10 @@ def solve_curobo(
                             raise RuntimeError(f"Failed to plan approach for {ground_op.name}")
                         approach_js = target_js
 
-                    # Slowly go inside the shelf on a perfect linear rail 
+                    # Slowly go inside the shelf on a perfect linear rail
                     if insertion_result is None and approach_js is not target_js:
                         motion_gen.world_coll_checker.enable_obstacle(enable=False, name=obj)
 
-                        
                         # LOCK ORIENTATION
                         insertion_pose = world_from_hover.clone()
 
@@ -410,7 +409,7 @@ def solve_curobo(
                         # Remove any vertical component
                         forward[2] = 0.0
                         forward = forward / torch.norm(forward)
-                       
+
                         # Translate only along shelf depth direction
                         insertion_distance = 0.22
 

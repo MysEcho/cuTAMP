@@ -454,4 +454,4 @@ class ParticleInitializer:
         if deferred_params:
             raise RuntimeError(f"Deferred parameters not resolved: {deferred_params}")
 
-        return particles
+        return particles, sampled_grasps[good_idxs]

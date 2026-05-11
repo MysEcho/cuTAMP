@@ -441,7 +441,8 @@ def sample_plan_skeleton(
 
     # Sample particles
     with timer.time("initialize_particles"):
-        plan_particles = particle_initializer(plan_skeleton)
+        plan_particles, sampled_grasps = particle_initializer(plan_skeleton)
+        print("Sampled 6DOF Grasps Shape: ", sampled_grasps.shape)
     if plan_particles is None:  # failed subgraph
         return None, False
 
@@ -593,7 +594,8 @@ def sample_plan_skeleton(
     _log.debug(
         f"[Plan {plan_count + 1}] {plan_info['num_satisfying']}/{config.num_particles} satisfying, heuristic = {plan_info['heuristic']}"
     )
-    return plan_info, num_satisfying > 0
+
+    return plan_info, num_satisfying > 0, sampled_grasps
 
 
 def resample_plan_info(
@@ -807,7 +809,7 @@ def run_cutamp(
                 print("=" * 60 + "\n")
                 # ==================================================
 
-                plan_info, has_solution = sample_plan_skeleton(
+                plan_info, has_solution, sampled_grasps = sample_plan_skeleton(
                     plan_gen,
                     candidate_poses_dict,
                     world,
@@ -1047,7 +1049,7 @@ def run_cutamp(
     # Log constraint and cost multipliers
     exp_logger.log_dict("multipliers", cost_reducer.cost_config)
     exp_logger.log_dict("tolerances", constraint_checker.constraint_config)
-    return curobo_plan, winning_pose_dict, overall_metrics["num_satisfying_final"]
+    return curobo_plan, winning_pose_dict, sampled_grasps, overall_metrics["num_satisfying_final"]
 
 
 """
