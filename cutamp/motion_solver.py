@@ -532,7 +532,7 @@ def solve_curobo(
                 local_shift_hover = torch.eye(4, dtype=torch.float32, device=world.device)
                 local_shift_hover[2, 3] = -hover_z_distance
 
-                is_top_down = world_from_ee[2, 2] < -0.5
+                is_top_down = False if is_shelf_scene else True
 
                 if is_top_down:
                     world_from_hover = world_from_ee.clone()

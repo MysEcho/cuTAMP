@@ -786,8 +786,8 @@ def run_cutamp(
                 # ==================================================
                 # --- MANUAL SKELETON TOGGLE FOR DEBUGGING ---
                 # ==================================================
-                TEST_DETECT_ONLY = True
-                TEST_PICK_ONLY = True
+                TEST_DETECT_ONLY = False
+                TEST_PICK_ONLY = False
 
                 truncated_skeleton = []
                 for op in plan_gen:
