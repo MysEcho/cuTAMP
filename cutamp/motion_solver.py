@@ -183,7 +183,7 @@ def solve_curobo(
             is_target_top_down = False if is_shelf_scene else True
 
             if is_target_top_down:
-                print("Executing Tabletop Scene.")
+                print("Executing Pick action for Tabletop Scene.")
                 # TABLETOP SCENE
                 with timer.time("curobo_planning"):
                     start_js = last_js
@@ -325,7 +325,7 @@ def solve_curobo(
                 last_op_type = "Pick"
 
             else:
-                print("Executing Shelf Scene.")
+                print("Executing Pick action for Shelf Scene.")
                 # SHELF SCENE (CARTESIAN SLIDE-IN / SLIDE-OUT)
                 with timer.time("curobo_planning"):
                     start_js = last_js
@@ -535,9 +535,11 @@ def solve_curobo(
                 is_top_down = False if is_shelf_scene else True
 
                 if is_top_down:
+                    print("Executing Place action for Tabletop Scene.")
                     world_from_hover = world_from_ee.clone()
                     world_from_hover[2, 3] += hover_z_distance
                 else:
+                    print("Executing Place action for Shelf Scene.")
                     world_from_hover = world_from_ee @ local_shift_hover
 
                 # Plan safe crossing above the table to the hover pose

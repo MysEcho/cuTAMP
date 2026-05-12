@@ -1019,7 +1019,7 @@ def run_cutamp(
                     config,
                     timer,
                     visualizer,
-                    is_shelf_scene,
+                    is_shelf_scene=is_shelf_scene,
                 )
             overall_metrics["num_satisfying_final"] = metrics["num_satisfying_final"]
             overall_metrics["final_plan_skeleton"] = [str(op) for op in plan_skeleton]
