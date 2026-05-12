@@ -119,8 +119,8 @@ def grasp_6dof_sampler(num_samples: int, obj: Obstacle, num_faces: Optional[int]
     # Create the lower bound as the exact negative of the upper bound
     lower = -upper.clone()
 
-    # Sample above the half height of the object
-    # lower[2] = 0.05
+    # Sample 8 cm above the base of the object
+    lower[2] = 0.08
 
     translation = torch.rand(num_samples, 3, device=obj.tensor_args.device)
     translation = lower + (upper - lower) * translation
@@ -221,6 +221,14 @@ def place_6dof_sampler(num_samples: int, obj: Obstacle, obj_spheres: torch.Tenso
     # Roll and Pitch Locked to 0.0
     roll = torch.zeros(num_samples, device=obj.tensor_args.device)
     pitch = torch.zeros(num_samples, device=obj.tensor_args.device)
+
+    # Optional: Lock Pitch to either 0 or pi/2
+    # pitch_choices = torch.tensor(
+    #     [0.0, -torch.pi / 2],
+    #     device=obj.tensor_args.device,
+    # )
+    # pitch_idxs = torch.randint(0, 2, (num_samples,), device=obj.tensor_args.device)
+    # pitch = pitch_choices[pitch_idxs]
 
     # Sample yaw normally
     yaw = sample_yaw(num_samples, None, obj.tensor_args.device)
