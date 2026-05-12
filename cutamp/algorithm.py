@@ -786,29 +786,43 @@ def run_cutamp(
                 # ==================================================
                 # --- MANUAL SKELETON TOGGLE FOR DEBUGGING ---
                 # ==================================================
-                TEST_DETECT_ONLY = False
-                TEST_PICK_ONLY = False
+                # TEST_DETECT_ONLY = False
+                # TEST_PICK_ONLY = False
 
-                truncated_skeleton = []
-                for op in plan_gen:
-                    truncated_skeleton.append(op)
-                    op_name = op.operator.name if hasattr(op, "operator") else op.name
+                # truncated_skeleton = []
+                # for op in plan_gen:
+                #     truncated_skeleton.append(op)
+                #     op_name = op.operator.name if hasattr(op, "operator") else op.name
 
-                    if TEST_DETECT_ONLY and not TEST_PICK_ONLY and "Detect" in op_name:
-                        break
-                    elif TEST_DETECT_ONLY and TEST_PICK_ONLY and "Pick" in op_name:
-                        break  # Stop immediately after the Pick!
-                    elif not TEST_DETECT_ONLY and not TEST_PICK_ONLY and "Place" in op_name:
-                        break  # Stop immediately after the first Place!
+                #     if TEST_DETECT_ONLY and not TEST_PICK_ONLY and "Detect" in op_name:
+                #         break
+                #     elif TEST_DETECT_ONLY and TEST_PICK_ONLY and "Pick" in op_name:
+                #         break  # Stop immediately after the Pick!
+                #     elif not TEST_DETECT_ONLY and not TEST_PICK_ONLY and "Place" in op_name:
+                #         break  # Stop immediately after the first Place!
 
-                plan_gen = truncated_skeleton
+                # plan_gen = truncated_skeleton
 
-                print("\n" + "=" * 60)
-                mode = "PICK ONLY" if TEST_PICK_ONLY else "PICK AND PLACE"
-                print(f" [DEBUG] EXECUTING ISOLATED SKELETON ({mode} - Length: {len(plan_gen)}):")
-                print(" -> ".join([op.name for op in plan_gen]))
-                print("=" * 60 + "\n")
+                # print("\n" + "=" * 60)
+                # mode = "PICK ONLY" if TEST_PICK_ONLY else "PICK AND PLACE"
+                # print(f" [DEBUG] EXECUTING ISOLATED SKELETON ({mode} - Length: {len(plan_gen)}):")
+                # print(" -> ".join([op.name for op in plan_gen]))
+                # print("=" * 60 + "\n")
                 # ==================================================
+
+                # Shelf Scene Auto Pruning
+                if is_shelf_scene:
+                    last_detect_idx = -1
+
+                    for i, op in enumerate(plan_gen):
+                        op_name = op.operator.name if hasattr(op, "operator") else op.name
+
+                        if "Detect" in op_name:
+                            last_detect_idx = i
+
+                    # Keep everything up to and including the last Detect
+                    if last_detect_idx != -1:
+                        plan_gen = plan_gen[: last_detect_idx + 1]
 
                 plan_info, has_solution, sampled_grasps = sample_plan_skeleton(
                     plan_gen,
