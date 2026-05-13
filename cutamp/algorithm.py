@@ -348,6 +348,7 @@ def yield_optimistic_skeletons(
                     motion_lambda=5.0,
                     nbv_lambda=1.0,
                     visualize_viewpoints=False,
+                    cost_type="pixel",
                 )
                 if target == mission_target_name:
                     optimistic_NBV_cost = vis_cost
