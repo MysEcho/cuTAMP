@@ -253,11 +253,10 @@ def sample_optimistic_placements(
 
 def yield_optimistic_skeletons(
     top_k_skeletons: List,
-    global_belief: BeliefManager,
     scene_config: dict,
     scene_mapping: dict,
-    world: TAMPWorld,
-    mission_target_name: str = "obj_0",
+    world: TAMPWorld,  
+    mission_target_name: str = "ghost",
     target_visible: bool = False,
     penalize_longer_plans: bool = False,
     verbose: bool = False,
@@ -265,7 +264,7 @@ def yield_optimistic_skeletons(
 
     if verbose:
         print("\n" + "=" * 60)
-        print("TASK LEVEL: Optimistic Heuristic Evaluation")
+        print("TASK LEVEL: Optimistic Holistic Evaluation")
         print("=" * 60)
 
     scored_skeletons = []
@@ -282,86 +281,89 @@ def yield_optimistic_skeletons(
     )
 
     for idx, skeleton in pbar:
-        plan_str = " -> ".join([op.name for op in skeleton])
+        plan_str = " -> ".join([op.name if not hasattr(op, "operator") else op.operator.name for op in skeleton])
 
-        effort_distance = 0.0
-        optimistic_NBV_cost = 0.0
         candidate_poses_dict = {}
-
-        current_ee_xyz = [0.0, 0.0, 0.9]
-        objects_moved = set()
-
-        # VERIFICATION TRACKER
+        effort_distance = 0.0
         cost_breakdown = []
+
+        # PHASE 1A: PRE-SCAN PLAN (Find Objects Moved & Detects)
+        objects_moved = set()
+        num_detects = 0
 
         for op in skeleton:
             op_base_name = op.operator.name if hasattr(op, "operator") else op.name
-
             if "Pick" in op_base_name:
+                target_obj = op.values[0]
+                if target_obj != mission_target_name:
+                    objects_moved.add(target_obj)
+            elif "Detect" in op_base_name:
+                num_detects += 1
+
+        # PHASE 1B: GENERATE MASTER NBV (Locked for entire plan)
+        current_ee_xyz = [0.0, 0.0, 0.9]  # Initial Robot Home
+
+        vis_cost, master_candidate_poses = cuTAMPUtilities.sample_NBV_for_cutamp(
+            env_metadata=(scene_config, scene_mapping),
+            plan_str=plan_str,
+            target_obj_name=mission_target_name,  # ALWAYS target ghost
+            current_ee_xyz=current_ee_xyz,  # Generate relative to home pose
+            ignore_objects=list(objects_moved),  # Remove all tracked occluders
+            verbose=False,
+            motion_lambda=1.0,
+            nbv_lambda=5.0,
+            visualize_viewpoints=True,
+            pixel_scale=150.0,
+        )
+
+        optimistic_NBV_cost = vis_cost
+
+        # Resolve the actual XYZ of the master camera pose
+        if master_candidate_poses and len(master_candidate_poses) > 0:
+            master_nbv_xyz = master_candidate_poses[0][:3]
+        else:
+            master_nbv_xyz = current_ee_xyz
+
+        # Initial Occlusion Penalty (If plan only looks, and target is hidden)
+        if num_detects == 1 and not target_visible:
+            effort_distance += 2000.0
+            cost_breakdown.append(f"  + Detect({mission_target_name}) OCCLUSION PENALTY: 2000.000m (Target is hidden!)")
+
+        # PHASE 2: SEQUENTIAL EFFORT EVALUATION
+        for op in skeleton:
+            op_base_name = op.operator.name if hasattr(op, "operator") else op.name
+
+            if "Detect" in op_base_name:
+                target = op.values[0]
+                pose_var_name = op.values[1]
+
+                # All Detect actions share the same master NBV coordinates
+                if not world.has_object(pose_var_name):
+                    candidate_poses_dict[pose_var_name] = master_candidate_poses
+
+                # Calculate travel to this camera pose
+                dist = torch.linalg.norm(torch.tensor(current_ee_xyz) - torch.tensor(master_nbv_xyz)).item()
+                effort_distance += dist
+
+                # Update current_ee_xyz to the camera location
+                current_ee_xyz = master_nbv_xyz
+                cost_breakdown.append(f"  + Detect({target} @ locked NBV) Travel: {dist:.3f}m")
+
+            elif "Pick" in op_base_name:
                 target_obj = op.values[0]
                 grasp_var_name = op.values[1]
 
-                # Initial Occlusion Exception
-                if not target_visible and target_obj == mission_target_name:
-                    if len(objects_moved) == 0:
-                        # Attempting to pick the hidden target before moving anything else!
-                        effort_distance += 2000.0
-                        cost_breakdown.append(
-                            f"  + Pick({target_obj}) OCCLUSION PENALTY: 2000.000m (Target is hidden!)"
-                        )
-
-                objects_moved.add(target_obj)
-
                 best_xyz, dist, best_grasp_pose = sample_optimistic_grasps(target_obj, current_ee_xyz, world)
-
                 effort_distance += dist
-                current_ee_xyz = best_xyz
+
+                # Do not update current_ee_xyz to grasp location.
+                # Keep it anchored to the last Detect pose.
 
                 if best_grasp_pose is not None and not world.has_object(grasp_var_name):
                     candidate_poses_dict[grasp_var_name] = torch.tensor(
                         [best_grasp_pose], dtype=torch.float32, device=world.device
                     )
-
                 cost_breakdown.append(f"  + Pick({target_obj}) Travel: {dist:.3f}m")
-
-            elif "Detect" in op_base_name:
-                target = op.values[0]
-                pose_var_name = op.values[1]
-
-                # Initial Occlusion Penalty
-                if not target_visible and target == mission_target_name:
-                    if len(objects_moved) == 0:
-                        # Attempting to detect the hidden target before moving anything else
-                        effort_distance += 2000.0
-                        cost_breakdown.append(f"  + Detect({target}) OCCLUSION PENALTY: 2000.000m (Target is hidden!)")
-
-                objects_to_ignore = list(objects_moved - {target})
-
-                vis_cost, master_candidate_poses = cuTAMPUtilities.sample_NBV_for_cutamp(
-                    global_belief=global_belief,
-                    env_metadata=(scene_config, scene_mapping),
-                    plan_str=plan_str,
-                    target_obj_name=target,
-                    current_ee_xyz=current_ee_xyz,
-                    ignore_objects=objects_to_ignore,
-                    verbose=False,
-                    motion_lambda=5.0,
-                    nbv_lambda=1.0,
-                    visualize_viewpoints=False,
-                    cost_type="pixel",
-                )
-                if target == mission_target_name:
-                    optimistic_NBV_cost = vis_cost
-
-                if master_candidate_poses is not None and not world.has_object(pose_var_name):
-                    candidate_poses_dict[pose_var_name] = master_candidate_poses
-
-                if master_candidate_poses is not None and len(master_candidate_poses) > 0:
-                    viewpoint_xyz = master_candidate_poses[0][:3]
-                    dist = torch.linalg.norm(torch.tensor(current_ee_xyz) - torch.tensor(viewpoint_xyz)).item()
-                    effort_distance += dist
-                    current_ee_xyz = viewpoint_xyz
-                    cost_breakdown.append(f"  + Detect({target}) Travel: {dist:.3f}m")
 
             elif "Place" in op_base_name:
                 target_obj = op.values[0]
@@ -373,24 +375,22 @@ def yield_optimistic_skeletons(
                     cost_breakdown.append(f"  + Place({target_obj} on table) PENALTY: 500.000m")
                 elif surface_name != "discard_zone":
                     effort_distance += 500.0
-                    cost_breakdown.append(
-                        f"  + Place({target_obj} on {surface_name}) PENALTY: 500.000m (Must use discard_zone)"
-                    )
+                    cost_breakdown.append(f"  + Place({target_obj} on {surface_name}) PENALTY: 500.000m")
                 else:
                     best_xyz, dist, best_place_pose = sample_optimistic_placements(
                         target_obj, surface_name, current_ee_xyz, world
                     )
                     effort_distance += dist
-                    current_ee_xyz = best_xyz
+
+                    # Do not update current_ee_xyz to place location.
 
                     if best_place_pose is not None and not world.has_object(placement_var_name):
                         candidate_poses_dict[placement_var_name] = torch.tensor(
                             [best_place_pose], dtype=torch.float32, device=world.device
                         )
-
                     cost_breakdown.append(f"  + Place({target_obj}) Travel: {dist:.3f}m")
 
-        # Total Cost Calculation
+        # PHASE 3: FINAL SCORING
         action_penalty = len(skeleton) * longer_plan_penalty if penalize_longer_plans else 0
         total_effort_cost = (effort_distance * WEIGHT_EFFORT) + action_penalty
         total_vis_cost = optimistic_NBV_cost * WEIGHT_VISIBILITY
@@ -402,7 +402,7 @@ def yield_optimistic_skeletons(
             for step in cost_breakdown:
                 print(step)
             print(f"  = Total Traveled: {effort_distance:.3f}m")
-            print(f"  = Objects Ignored: {objects_to_ignore}")
+            print(f"  = Objects Ignored: {list(objects_moved)}")
             print(f"  = Final Viz Cost : {total_vis_cost:.3f}")
             print(f"  = Final Task Cost (w/ Vis & Penalties): {total_task_cost:.3f}")
 
@@ -763,12 +763,12 @@ def run_cutamp(
     # Select Best skeleton based on Optimistic NBV simulation
     with timer.time("optimistic_evaluation"):
         optimistic_plan_gen = yield_optimistic_skeletons(
-            top_k_skeletons,
-            global_belief,
-            scene_config,
-            scene_mapping,
-            world,
-            mission_target_name,
+            top_k_skeletons=top_k_skeletons,
+            scene_config=scene_config,
+            scene_mapping=scene_mapping,
+            world=world,
+            mission_target_name=mission_target_name,
+            target_visible=False,
             penalize_longer_plans=False,
             verbose=verbose,
         )
