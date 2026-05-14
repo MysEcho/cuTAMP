@@ -10,17 +10,14 @@
 
 import logging
 from datetime import datetime
-from typing import Any, Iterator, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 from unittest.mock import Mock
 
-import numpy as np
-import pybullet as p
 import torch
 from curobo.types.base import TensorDeviceType
 from curobo.types.math import Pose
+from imagine_tamp import yield_optimistic_skeletons
 from imagine_tamp.tamp.belief import BeliefManager
-from imagine_tamp.tamp.cutamp_utils import cuTAMPUtilities
-from tqdm import tqdm
 
 from cutamp.config import TAMPConfiguration, validate_tamp_config
 from cutamp.constraint_checker import ConstraintChecker
@@ -115,295 +112,6 @@ def get_best_particle(
     return best_particle
 
 
-def sample_optimistic_grasps(obj_name: str, current_ee_xyz: list, world: TAMPWorld, num_samples=20) -> tuple:
-    """Samples top-down grasps, validates them using PyBullet's built-in IK, and returns the closest one."""
-    try:
-        obj_pose = world.get_object(obj_name).pose
-        if torch.is_tensor(obj_pose):
-            obj_pose = obj_pose.cpu().numpy()
-        obj_xyz = obj_pose[:3]
-    except Exception:
-        return current_ee_xyz, 0.0, None  # Fallback
-
-    valid_grasps = []
-
-    try:
-        # Panda robot in the PyBullet scene
-        robot_id = 0
-        for i in range(p.getNumBodies()):
-            info = p.getBodyInfo(i)
-            if b"panda" in info[1].lower() or b"franka" in info[1].lower():
-                robot_id = i
-                break
-
-        for _ in range(num_samples):
-            yaw = np.random.uniform(-np.pi, np.pi)
-            target_pos = [obj_xyz[0], obj_xyz[1], obj_xyz[2] + 0.13]
-            target_quat = p.getQuaternionFromEuler([np.pi, 0.0, yaw])  # Top-down grasp
-
-            # calculateInverseKinematics returns joint angles. If it executes
-            # successfully, the pose is kinematically feasible for heuristic
-            p.calculateInverseKinematics(
-                bodyUniqueId=robot_id,
-                endEffectorLinkIndex=8,  # Panda wrist
-                targetPosition=target_pos,
-                targetOrientation=target_quat,
-                maxNumIterations=20,
-                residualThreshold=1e-3,
-            )
-            valid_grasps.append((target_pos, yaw))
-
-    except Exception as e:
-        print(f"  [PyBullet Warning] IK failed: {e}. Falling back to geometry heuristic.")
-        # Fallback to pure geometry if PyBullet is disconnected
-        for _ in range(num_samples):
-            yaw = np.random.uniform(-np.pi, np.pi)
-            target_pos = [obj_xyz[0], obj_xyz[1], obj_xyz[2] + 0.13]
-            valid_grasps.append((target_pos, yaw))
-
-    if not valid_grasps:
-        dist = torch.linalg.norm(torch.tensor(current_ee_xyz) - torch.tensor(obj_xyz)).item()
-        return obj_xyz, dist, None
-
-    # Find the valid grasp closest to the arm's current position
-    best_grasp_tensor = None
-    min_dist = float("inf")
-    best_xyz = None
-
-    for pos, yaw in valid_grasps:
-        dist = np.linalg.norm(np.array(current_ee_xyz) - np.array(pos))
-        if dist < min_dist:
-            min_dist = dist
-            best_xyz = pos
-            best_grasp_tensor = [pos[0], pos[1], pos[2], yaw]
-
-    return best_xyz, min_dist, best_grasp_tensor
-
-
-def sample_optimistic_placements(
-    obj_name: str,
-    surface_name: str,
-    current_ee_xyz: list,
-    world: TAMPWorld,
-    num_samples=10,
-) -> tuple:
-    """Samples placements on a surface, filters for collisions, and returns the closest valid one."""
-    try:
-        surface_aabb = world.get_aabb(surface_name)
-        if torch.is_tensor(surface_aabb):
-            surface_aabb = surface_aabb.cpu().numpy()
-    except Exception:
-        return current_ee_xyz, 0.0, None
-
-    valid_placements = []
-
-    # Sample placements inside the surface bounds
-    for _ in range(num_samples):
-        # Sample X, Y inside the AABB, padded to avoid edges
-        x = np.random.uniform(surface_aabb[0, 0] + 0.05, surface_aabb[1, 0] - 0.05)
-        y = np.random.uniform(surface_aabb[0, 1] + 0.05, surface_aabb[1, 1] - 0.05)
-        z = surface_aabb[1, 2] + 0.05  # Surface Z + half object height
-
-        place_xyz = [x, y, z]
-        yaw = np.random.uniform(-np.pi, np.pi)
-        place_pose = place_xyz + [yaw]
-
-        # Check distance to other objects to avoid placing on top of them
-        collision = False
-        for other_obj in world.movables:
-            if other_obj.name != obj_name:
-                # Ensure other_xyz is safely handled whether it's a list or a tensor
-                other_xyz = other_obj.pose[:3]
-                if torch.is_tensor(other_xyz):
-                    other_xyz = other_xyz.cpu().numpy()
-
-                if np.linalg.norm(np.array(place_xyz[:2]) - np.array(other_xyz[:2])) < 0.08:  # 8cm clearance
-                    collision = True
-                    break
-
-        if not collision:
-            valid_placements.append((place_xyz, place_pose))
-
-    if not valid_placements:
-        return current_ee_xyz, 5.0, None  # Massive penalty if no valid placements found
-
-    # Find the one closest to the arm's current holding position
-    best_place = None
-    min_dist = float("inf")
-
-    for xyz, pose in valid_placements:
-        dist = torch.linalg.norm(torch.tensor(current_ee_xyz) - torch.tensor(xyz)).item()
-        if dist < min_dist:
-            min_dist = dist
-            best_place = pose
-            best_xyz = xyz
-
-    return best_xyz, min_dist, best_place
-
-
-def yield_optimistic_skeletons(
-    top_k_skeletons: List,
-    global_belief: BeliefManager,
-    scene_config: dict,
-    scene_mapping: dict,
-    world: TAMPWorld,
-    mission_target_name: str = "obj_0",
-    target_visible: bool = False,
-    penalize_longer_plans: bool = False,
-    verbose: bool = False,
-) -> Iterator[Tuple[Any, List, dict]]:
-
-    if verbose:
-        print("\n" + "=" * 60)
-        print("TASK LEVEL: Optimistic Heuristic Evaluation")
-        print("=" * 60)
-
-    scored_skeletons = []
-
-    # Heuristic Weights
-    WEIGHT_EFFORT = 1.0
-    WEIGHT_VISIBILITY = 2.5
-    longer_plan_penalty = 5.0
-
-    pbar = tqdm(
-        enumerate(top_k_skeletons),
-        total=len(top_k_skeletons),
-        desc="Evaluating Skeletons",
-    )
-
-    for idx, skeleton in pbar:
-        plan_str = " -> ".join([op.name for op in skeleton])
-
-        effort_distance = 0.0
-        optimistic_NBV_cost = 0.0
-        candidate_poses_dict = {}
-
-        current_ee_xyz = [0.0, 0.0, 0.9]
-        objects_moved = set()
-
-        # VERIFICATION TRACKER
-        cost_breakdown = []
-
-        for op in skeleton:
-            op_base_name = op.operator.name if hasattr(op, "operator") else op.name
-
-            if "Pick" in op_base_name:
-                target_obj = op.values[0]
-                grasp_var_name = op.values[1]
-
-                # Initial Occlusion Exception
-                if not target_visible and target_obj == mission_target_name:
-                    if len(objects_moved) == 0:
-                        # Attempting to pick the hidden target before moving anything else!
-                        effort_distance += 2000.0
-                        cost_breakdown.append(
-                            f"  + Pick({target_obj}) OCCLUSION PENALTY: 2000.000m (Target is hidden!)"
-                        )
-
-                objects_moved.add(target_obj)
-
-                best_xyz, dist, best_grasp_pose = sample_optimistic_grasps(target_obj, current_ee_xyz, world)
-
-                effort_distance += dist
-                current_ee_xyz = best_xyz
-
-                if best_grasp_pose is not None and not world.has_object(grasp_var_name):
-                    candidate_poses_dict[grasp_var_name] = torch.tensor(
-                        [best_grasp_pose], dtype=torch.float32, device=world.device
-                    )
-
-                cost_breakdown.append(f"  + Pick({target_obj}) Travel: {dist:.3f}m")
-
-            elif "Detect" in op_base_name:
-                target = op.values[0]
-                pose_var_name = op.values[1]
-
-                # Initial Occlusion Penalty
-                if not target_visible and target == mission_target_name:
-                    if len(objects_moved) == 0:
-                        # Attempting to detect the hidden target before moving anything else
-                        effort_distance += 2000.0
-                        cost_breakdown.append(f"  + Detect({target}) OCCLUSION PENALTY: 2000.000m (Target is hidden!)")
-
-                objects_to_ignore = list(objects_moved - {target})
-
-                vis_cost, master_candidate_poses = cuTAMPUtilities.sample_NBV_for_cutamp(
-                    global_belief=global_belief,
-                    env_metadata=(scene_config, scene_mapping),
-                    plan_str=plan_str,
-                    target_obj_name=target,
-                    current_ee_xyz=current_ee_xyz,
-                    ignore_objects=objects_to_ignore,
-                    verbose=False,
-                    motion_lambda=5.0,
-                    nbv_lambda=1.0,
-                )
-                if target == mission_target_name:
-                    optimistic_NBV_cost = vis_cost
-
-                if master_candidate_poses is not None and not world.has_object(pose_var_name):
-                    candidate_poses_dict[pose_var_name] = master_candidate_poses
-
-                if master_candidate_poses is not None and len(master_candidate_poses) > 0:
-                    viewpoint_xyz = master_candidate_poses[0][:3]
-                    dist = torch.linalg.norm(torch.tensor(current_ee_xyz) - torch.tensor(viewpoint_xyz)).item()
-                    effort_distance += dist
-                    current_ee_xyz = viewpoint_xyz
-                    cost_breakdown.append(f"  + Detect({target}) Travel: {dist:.3f}m")
-
-            elif "Place" in op_base_name:
-                target_obj = op.values[0]
-                placement_var_name = op.values[2]
-                surface_name = op.values[3]
-
-                if surface_name == "table":
-                    effort_distance += 500.0
-                    cost_breakdown.append(f"  + Place({target_obj} on table) PENALTY: 500.000m")
-                else:
-                    best_xyz, dist, best_place_pose = sample_optimistic_placements(
-                        target_obj, surface_name, current_ee_xyz, world
-                    )
-                    effort_distance += dist
-                    current_ee_xyz = best_xyz
-
-                    if best_place_pose is not None and not world.has_object(placement_var_name):
-                        candidate_poses_dict[placement_var_name] = torch.tensor(
-                            [best_place_pose], dtype=torch.float32, device=world.device
-                        )
-
-                    cost_breakdown.append(f"  + Place({target_obj}) Travel: {dist:.3f}m")
-
-        # Total Cost Calculation
-        action_penalty = len(skeleton) * longer_plan_penalty if penalize_longer_plans else 0
-        total_effort_cost = (effort_distance * WEIGHT_EFFORT) + action_penalty
-        total_vis_cost = optimistic_NBV_cost * WEIGHT_VISIBILITY
-        total_task_cost = total_effort_cost + total_vis_cost
-
-        # VERIFICATION OUTPUT
-        if verbose:
-            print(f"\n[Skeleton {idx + 1} Verification] {plan_str}")
-            for step in cost_breakdown:
-                print(step)
-            print(f"  = Total Traveled: {effort_distance:.3f}m")
-            print(f"  = Objects Ignored: {objects_to_ignore}")
-            print(f"  = Final Viz Cost : {total_vis_cost:.3f}")
-            print(f"  = Final Task Cost (w/ Vis & Penalties): {total_task_cost:.3f}")
-
-        scored_skeletons.append(
-            {
-                "skeleton": skeleton,
-                "cost": total_task_cost,
-                "plan_str": plan_str,
-                "candidate_poses_dict": candidate_poses_dict,
-            }
-        )
-
-    scored_skeletons.sort(key=lambda x: x["cost"])
-
-    for rank, item in enumerate(scored_skeletons):
-        yield item["cost"], item["skeleton"], item["candidate_poses_dict"]
-
-
 def sample_plan_skeleton(
     plan_skeleton,
     candidate_poses_dict: dict,
@@ -425,7 +133,8 @@ def sample_plan_skeleton(
 
     # Sample particles
     with timer.time("initialize_particles"):
-        plan_particles = particle_initializer(plan_skeleton)
+        plan_particles, sampled_grasps = particle_initializer(plan_skeleton)
+        print("Sampled 6DOF Grasps Shape: ", sampled_grasps.shape)
     if plan_particles is None:  # failed subgraph
         return None, False
 
@@ -510,12 +219,40 @@ def sample_plan_skeleton(
     with timer.time("measure_heuristic"), torch.no_grad():
         rollout = rollout_fn(plan_particles)
         cost_dict = cost_fn(rollout)
+        print(f"\n[COST TRACKER] Analyzing {config.num_particles} particles for: {' -> '.join(plan_str)}")
+
+        found_explosions = False
+        # cost_dict usually has keys like ('Pick(obj_1)', 'collision_world')
+        for key, val in cost_dict.items():
+            # Handle nested dictionaries or direct tensor mapping
+            if isinstance(val, dict):
+                for sub_key, sub_val in val.items():
+                    if isinstance(sub_val, torch.Tensor):
+                        max_val = sub_val.max().item()
+                        min_val = sub_val.min().item()
+                        if min_val > 0.5:  # If even the best particle has a high cost, it's a geometry problem
+                            print(
+                                f"  [!] EXPLOSION in {key} -> {sub_key} | Min Cost: {min_val:.3f} | Max: {max_val:.3f}"
+                            )
+                            found_explosions = True
+            elif isinstance(val, torch.Tensor):
+                max_val = val.max().item()
+                min_val = val.min().item()
+                if min_val > 0.5:
+                    print(f"  [!] EXPLOSION in {key} | Min Cost: {min_val:.3f} | Max Cost: {max_val:.3f}")
+                    found_explosions = True
+
+        if not found_explosions:
+            print("  [✓] All actions look mathematically safe! (Min costs < 0.5)")
+        print("=====================================================================\n")
         heuristic = heuristic_fn(plan_skeleton, cost_dict, constraint_checker)
 
+    print("Heuristic Cost for this plan: ", heuristic)
     # Number of satisfying particles
     with timer.time("get_satisfying_mask"):
         satisfying_mask = constraint_checker.get_mask(cost_dict)
     num_satisfying = satisfying_mask.sum().item()
+    print("Number of solutions for this plan: ", num_satisfying)
 
     if config.stick_button_experiment and num_satisfying > 0:
         # Custom logic in stick button for breaking early for sampling baseline
@@ -549,7 +286,8 @@ def sample_plan_skeleton(
     _log.debug(
         f"[Plan {plan_count + 1}] {plan_info['num_satisfying']}/{config.num_particles} satisfying, heuristic = {plan_info['heuristic']}"
     )
-    return plan_info, num_satisfying > 0
+
+    return plan_info, num_satisfying > 0, sampled_grasps
 
 
 def resample_plan_info(
@@ -676,9 +414,11 @@ def run_cutamp(
     cost_reducer: CostReducer,
     constraint_checker: ConstraintChecker,
     q_init: Optional[List[float]] = None,
+    real_ee_xyz_pos: List[float] = None,
     experiment_id: Optional[str] = None,
     verbose: bool = False,
     num_plan_skeletons: int = 30,
+    is_shelf_scene: bool = True,
 ):
     """Overall cuTAMP algorithm implementation."""
 
@@ -710,19 +450,21 @@ def run_cutamp(
         )
 
     # Isolation Test
-    # cuTAMPUtilities.test_symbolic_task_planner(top_k_skeletons,verbose=True)
+    # cuTAMPUtilities.test_symbolic_task_planner(top_k_skeletons, verbose=True)
 
     # Select Best skeleton based on Optimistic NBV simulation
     with timer.time("optimistic_evaluation"):
         optimistic_plan_gen = yield_optimistic_skeletons(
-            top_k_skeletons,
-            global_belief,
-            scene_config,
-            scene_mapping,
-            world,
-            mission_target_name,
+            top_k_skeletons=top_k_skeletons,
+            scene_config=scene_config,
+            scene_mapping=scene_mapping,
+            world=world,
+            robot_ee_state=real_ee_xyz_pos,
+            mission_target_name=mission_target_name,
+            target_visible=False,
             penalize_longer_plans=False,
             verbose=verbose,
+            is_shelf_scene=is_shelf_scene,
         )
 
     # Heuristic Evaluation
@@ -739,28 +481,45 @@ def run_cutamp(
                 # ==================================================
                 # --- MANUAL SKELETON TOGGLE FOR DEBUGGING ---
                 # ==================================================
+                # TEST_DETECT_ONLY = False
                 # TEST_PICK_ONLY = False
 
                 # truncated_skeleton = []
                 # for op in plan_gen:
                 #     truncated_skeleton.append(op)
-                #     op_name = op.operator.name if hasattr(op, 'operator') else op.name
+                #     op_name = op.operator.name if hasattr(op, "operator") else op.name
 
-                #     if TEST_PICK_ONLY and "Pick" in op_name:
-                #         break # Stop immediately after the Pick!
-                #     elif not TEST_PICK_ONLY and "Place" in op_name:
-                #         break # Stop immediately after the first Place!
+                #     if TEST_DETECT_ONLY and not TEST_PICK_ONLY and "Detect" in op_name:
+                #         break
+                #     elif TEST_DETECT_ONLY and TEST_PICK_ONLY and "Pick" in op_name:
+                #         break  # Stop immediately after the Pick!
+                #     elif not TEST_DETECT_ONLY and not TEST_PICK_ONLY and "Place" in op_name:
+                #         break  # Stop immediately after the first Place!
 
                 # plan_gen = truncated_skeleton
 
-                # print("\n" + "="*60)
+                # print("\n" + "=" * 60)
                 # mode = "PICK ONLY" if TEST_PICK_ONLY else "PICK AND PLACE"
                 # print(f" [DEBUG] EXECUTING ISOLATED SKELETON ({mode} - Length: {len(plan_gen)}):")
                 # print(" -> ".join([op.name for op in plan_gen]))
-                # print("="*60 + "\n")
+                # print("=" * 60 + "\n")
                 # ==================================================
 
-                plan_info, has_solution = sample_plan_skeleton(
+                # Shelf Scene Auto Pruning
+                if is_shelf_scene:
+                    last_detect_idx = -1
+
+                    for i, op in enumerate(plan_gen):
+                        op_name = op.operator.name if hasattr(op, "operator") else op.name
+
+                        if "Detect" in op_name:
+                            last_detect_idx = i
+
+                    # Keep everything up to and including the last Detect
+                    if last_detect_idx != -1:
+                        plan_gen = plan_gen[: last_detect_idx + 1]
+
+                plan_info, has_solution, sampled_grasps = sample_plan_skeleton(
                     plan_gen,
                     candidate_poses_dict,
                     world,
@@ -969,6 +728,7 @@ def run_cutamp(
                     config,
                     timer,
                     visualizer,
+                    is_shelf_scene=is_shelf_scene,
                 )
             overall_metrics["num_satisfying_final"] = metrics["num_satisfying_final"]
             overall_metrics["final_plan_skeleton"] = [str(op) for op in plan_skeleton]
@@ -1000,7 +760,7 @@ def run_cutamp(
     # Log constraint and cost multipliers
     exp_logger.log_dict("multipliers", cost_reducer.cost_config)
     exp_logger.log_dict("tolerances", constraint_checker.constraint_config)
-    return curobo_plan, winning_pose_dict, overall_metrics["num_satisfying_final"]
+    return curobo_plan, winning_pose_dict, sampled_grasps, overall_metrics["num_satisfying_final"]
 
 
 """

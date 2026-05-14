@@ -61,7 +61,7 @@ class CostFunction:
         self.valid_push_constraints = []
         self.valid_push_stick_constraints = []
         self.traj_length_costs = []
-        self.grasp_costs = []  
+        self.grasp_costs = []
 
         type_to_list = {
             KinematicConstraint.type: self.kinematic_constraints,
@@ -76,9 +76,9 @@ class CostFunction:
             TrajectoryLength.type: self.traj_length_costs,
             GraspCost.type: self.grasp_costs,  # <--- REGISTERED GRASP COST
         }
-        
-        warning_co = set() 
-        
+
+        warning_co = set()
+
         for ground_op in plan_skeleton:
             for co in [*ground_op.constraints, *ground_op.costs]:
                 if co.type not in type_to_list:
@@ -138,7 +138,7 @@ class CostFunction:
             if not self.world.has_object(button):
                 raise ValueError(f"{button=} not found in world")
             if button in self.button_to_action:
-                raise NotImplementedError(f"We only support pushing a button once right now")
+                raise NotImplementedError("We only support pushing a button once right now")
 
             # Set z to be 2cm buffer above surface of the button
             aabb = self.world.get_aabb(button).clone()
@@ -159,7 +159,7 @@ class CostFunction:
             if not self.world.has_object(stick):
                 raise ValueError(f"{stick=} not found in world")
             if button in self.button_to_stick:
-                raise NotImplementedError(f"We only support pushing a button once right now")
+                raise NotImplementedError("We only support pushing a button once right now")
 
             # Set z to be 2cm buffer above surface of the button
             button_aabb = self.world.get_aabb(button).clone()
@@ -215,17 +215,19 @@ class CostFunction:
         grasp_vals = {}
         for co in self.grasp_costs:
             obj_name, grasp_var = co.params
-            
+
             if grasp_var not in rollout:
                 continue
-                
+
             grasp_tensor = rollout[grasp_var]
-            
-            # Penalize X, Y drift to center it, and Z offset to make it flush
-            xy_penalty = torch.sum(grasp_tensor[..., 0:2] ** 2, dim=-1)
-            z_penalty = grasp_tensor[..., 2] ** 2
-            
-            # We do not penalize Yaw (idx 3) so the wrist can align to geometry
+
+            # Weaken the XY penalty so the optimizer can slide the hand
+            # to the front/side edges of the box to dodge the shelf walls.
+            xy_penalty = torch.sum(grasp_tensor[..., 0:2] ** 2, dim=-1) * 0.005
+
+            # Keep Z penalty strong so the fingers stay vertically aligned on the box
+            z_penalty = grasp_tensor[..., 2] ** 2 * 5.0
+
             cost = xy_penalty + z_penalty
             grasp_vals[f"grasp_err_{grasp_var}"] = cost
 

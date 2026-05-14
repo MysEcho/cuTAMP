@@ -21,6 +21,7 @@ from cutamp.samplers import (
     grasp_4dof_sampler,
     grasp_6dof_sampler,
     place_4dof_sampler,
+    place_6dof_sampler,
     sample_yaw,
 )
 from cutamp.tamp_domain import MoveFree, MoveHolding, Pick, Place, Push, PushStick
@@ -201,10 +202,20 @@ class ParticleInitializer:
                     sampled_placements = torch.cat([xyz, yaw.unsqueeze(-1)], dim=1)
                 else:
                     surface_curobo = world.get_object(surface)
-                    sampled_placements = place_4dof_sampler(num_particles * 4, obj_curobo, obj_spheres, surface_curobo)
+                    if config.grasp_dof == 4:
+                        sampled_placements = place_4dof_sampler(
+                            num_particles * 4, obj_curobo, obj_spheres, surface_curobo
+                        )
+                    else:
+                        sampled_placements = place_6dof_sampler(
+                            num_particles * 4, obj_curobo, obj_spheres, surface_curobo
+                        )
 
                 # Select the placements that are not in collision with the object
-                world_from_obj = action_4dof_to_mat4x4(sampled_placements)  # desired placement pose
+                if sampled_placements.shape[-1] == 6:
+                    world_from_obj = action_6dof_to_mat4x4(sampled_placements)
+                else:
+                    world_from_obj = action_4dof_to_mat4x4(sampled_placements)
                 obj_place_spheres = transform_spheres(obj_spheres, world_from_obj)
                 place_coll = world.collision_fn(obj_place_spheres[:, None].contiguous())[:, 0]
                 best_idxs = place_coll.topk(num_particles, largest=False).indices
@@ -423,9 +434,7 @@ class ParticleInitializer:
                 # Allocate empty memory for the Cartesian target (7D: x, y, z, qw, qz, qy, qz)
                 # Overridden by N tiled viewpoints while particle initialization
                 particles[pose_name] = torch.zeros(
-                    (num_particles, 7), 
-                    dtype=world.tensor_args.dtype, 
-                    device=world.tensor_args.device
+                    (num_particles, 7), dtype=world.tensor_args.dtype, device=world.tensor_args.device
                 )
 
                 # Allocate memory for joint configurations
@@ -434,7 +443,7 @@ class ParticleInitializer:
 
                 if q in deferred_params:
                     deferred_params.remove(q)
-                    
+
                 log_debug(f"{header}. Memory allocated for Detect. Awaiting NBV injection.")
 
             # Unknown
@@ -445,4 +454,4 @@ class ParticleInitializer:
         if deferred_params:
             raise RuntimeError(f"Deferred parameters not resolved: {deferred_params}")
 
-        return particles
+        return particles, sampled_grasps[good_idxs]
