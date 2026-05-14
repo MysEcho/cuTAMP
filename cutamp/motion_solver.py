@@ -66,7 +66,7 @@ def solve_curobo(
     last_q_name = "q0"
 
     # Top-Down Hover Distance (20cm directly above objects in World Space)
-    hover_z_distance = 0.20
+    hover_z_distance = 0.40
 
     # Accumulated plans that the real robot can actually execute
     last_op_type = None
@@ -532,6 +532,10 @@ def solve_curobo(
                 local_shift_hover = torch.eye(4, dtype=torch.float32, device=world.device)
                 local_shift_hover[2, 3] = -hover_z_distance
 
+                hover_z_distance_shelf = 0.20
+                local_shift_hover_shelf = torch.eye(4, dtype=torch.float32, device=world.device)
+                local_shift_hover_shelf[2, 3] = -hover_z_distance_shelf
+
                 is_top_down = False if is_shelf_scene else True
 
                 if is_top_down:
@@ -540,7 +544,7 @@ def solve_curobo(
                     world_from_hover[2, 3] += hover_z_distance
                 else:
                     print("Executing Place action for Shelf Scene.")
-                    world_from_hover = world_from_ee @ local_shift_hover
+                    world_from_hover = world_from_ee @ local_shift_hover_shelf
 
                 # Plan safe crossing above the table to the hover pose
                 approach_result = motion_gen.plan_single(start_js, Pose.from_matrix(world_from_hover), plan_config)

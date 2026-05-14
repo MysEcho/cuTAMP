@@ -414,6 +414,7 @@ def run_cutamp(
     cost_reducer: CostReducer,
     constraint_checker: ConstraintChecker,
     q_init: Optional[List[float]] = None,
+    real_ee_xyz_pos: List[float] = None,
     experiment_id: Optional[str] = None,
     verbose: bool = False,
     num_plan_skeletons: int = 30,
@@ -458,10 +459,12 @@ def run_cutamp(
             scene_config=scene_config,
             scene_mapping=scene_mapping,
             world=world,
+            robot_ee_state=real_ee_xyz_pos,
             mission_target_name=mission_target_name,
             target_visible=False,
             penalize_longer_plans=False,
             verbose=verbose,
+            is_shelf_scene=is_shelf_scene,
         )
 
     # Heuristic Evaluation
