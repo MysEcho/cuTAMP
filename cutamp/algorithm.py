@@ -16,8 +16,7 @@ from unittest.mock import Mock
 import torch
 from curobo.types.base import TensorDeviceType
 from curobo.types.math import Pose
-from imagine_tamp import yield_optimistic_skeletons
-from imagine_tamp.tamp.belief import BeliefManager
+from imagine_tamp import BeliefManager, yield_optimistic_skeletons, test_manual_skeleton, auto_prune_shelf_plan
 
 from cutamp.config import TAMPConfiguration, validate_tamp_config
 from cutamp.constraint_checker import ConstraintChecker
@@ -478,46 +477,13 @@ def run_cutamp(
             try:
                 custom_task_cost, plan_gen, candidate_poses_dict = next(optimistic_plan_gen)
 
-                # ==================================================
-                # --- MANUAL SKELETON TOGGLE FOR DEBUGGING ---
-                # ==================================================
-                # TEST_DETECT_ONLY = False
-                # TEST_PICK_ONLY = False
+                ################### CUSTOM DEBUG SCRIPTS #################################
+                # Test Manual Skeletons for Debugging
+                # test_manual_skeleton(TEST_DETECT_ONLY=False, TEST_PICK_ONLY=False)
 
-                # truncated_skeleton = []
-                # for op in plan_gen:
-                #     truncated_skeleton.append(op)
-                #     op_name = op.operator.name if hasattr(op, "operator") else op.name
-
-                #     if TEST_DETECT_ONLY and not TEST_PICK_ONLY and "Detect" in op_name:
-                #         break
-                #     elif TEST_DETECT_ONLY and TEST_PICK_ONLY and "Pick" in op_name:
-                #         break  # Stop immediately after the Pick!
-                #     elif not TEST_DETECT_ONLY and not TEST_PICK_ONLY and "Place" in op_name:
-                #         break  # Stop immediately after the first Place!
-
-                # plan_gen = truncated_skeleton
-
-                # print("\n" + "=" * 60)
-                # mode = "PICK ONLY" if TEST_PICK_ONLY else "PICK AND PLACE"
-                # print(f" [DEBUG] EXECUTING ISOLATED SKELETON ({mode} - Length: {len(plan_gen)}):")
-                # print(" -> ".join([op.name for op in plan_gen]))
-                # print("=" * 60 + "\n")
-                # ==================================================
-
-                # Shelf Scene Auto Pruning
-                if is_shelf_scene:
-                    last_detect_idx = -1
-
-                    for i, op in enumerate(plan_gen):
-                        op_name = op.operator.name if hasattr(op, "operator") else op.name
-
-                        if "Detect" in op_name:
-                            last_detect_idx = i
-
-                    # Keep everything up to and including the last Detect
-                    if last_detect_idx != -1:
-                        plan_gen = plan_gen[: last_detect_idx + 1]
+                # Auto Prune Skeletons for Shelf Scene (for Debugging)
+                # auto_prune_shelf_plan(plan_gen=plan_gen, is_shelf_scene=is_shelf_scene)
+                ##########################################################################
 
                 plan_info, has_solution, sampled_grasps = sample_plan_skeleton(
                     plan_gen,
@@ -761,12 +727,3 @@ def run_cutamp(
     exp_logger.log_dict("multipliers", cost_reducer.cost_config)
     exp_logger.log_dict("tolerances", constraint_checker.constraint_config)
     return curobo_plan, winning_pose_dict, sampled_grasps, overall_metrics["num_satisfying_final"]
-
-
-"""
-# TODO:
-
-i) Should I add AnyGrasp instead of sampling uniform grasps? For the final grasp pose, not the optimistic grasp pose.
-ii) If cuTAMP does not work properly, should I just shift to PB based motion generation? 
-
-"""
